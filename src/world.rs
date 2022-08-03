@@ -11,14 +11,11 @@ impl World {
 
     pub fn tick(&mut self, time: f64) {
         let particles_len = self.particles.len();
-        for particle in &mut self.particles {
-            particle.acceleration = Vector::new(0.0, 0.0);
-        }
+        let mut accelerations = vec![Vector::new(0.0, 0.0); particles_len];
         for i in 0..particles_len {
             for j in i+1..particles_len {
-                let (slice_a, slice_b) = self.particles.split_at_mut(j);
-                let a = &mut slice_a[i];
-                let b = &mut slice_b[0];
+                let a = self.particles[i];
+                let b = self.particles[j];
                 let r_sq = Vector::distance_sq(&a.position, &b.position);
                 // Newtons law of universal gravitation: (G * m1 * m2) / r^2
                 let f = (6.674_30e-11 * a.mass * b.mass / r_sq) * time;
@@ -28,13 +25,13 @@ impl World {
                     let d1 = f64::atan2(y2 - y1, x2 - x1);
                     let d2 = f64::atan2(y1 - y2, x1 - x2);
                     // f = ma
-                    a.acceleration += Vector::new(f / a.mass, d1);
-                    b.acceleration += Vector::new(f / b.mass, d2);
+                    accelerations[i] += Vector::new(f / a.mass, d1);
+                    accelerations[j] += Vector::new(f / b.mass, d2);
                 }
             }
         }
-        for particle in &mut self.particles {
-            particle.velocity.step(&particle.acceleration, time);
+        for (i, particle) in &mut self.particles.iter_mut().enumerate() {
+            particle.velocity.step(&accelerations[i], time);
             particle.position.step(&particle.velocity, time);
         }
     }
@@ -61,6 +58,5 @@ pub struct MassPoint {
 pub struct Particle {
     pub mass: f64,
     pub position: Vector,
-    pub velocity: Vector,
-    pub acceleration: Vector
+    pub velocity: Vector
 }

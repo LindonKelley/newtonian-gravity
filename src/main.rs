@@ -21,7 +21,7 @@ mod periodic_logger;
 fn main() {
     initialize_logging();
 
-    const PARTICLE_COUNT: usize = 1000;
+    const PARTICLE_COUNT: usize = 100;
     const FRAME_COUNT: u32 = 240;
     const SCALE: f64 = 500.0;
     const TIME_SCALE: f64 = 10.0;
@@ -33,27 +33,23 @@ fn main() {
     world.particles.push(Particle {
         mass: 10000.0,
         position: Vector::new(0.0, 0.0),
-        velocity: Vector::new(0.0, 0.0),
-        acceleration: Vector::new(0.0, 0.0)
+        velocity: Vector::new(0.0, 0.0)
     });
     world.particles.push(Particle {
         mass: 100.0,
         position: Vector::new(0.50, 0.0),
-        velocity: Vector::new(0.001, FRAC_PI_2),
-        acceleration: Vector::new(0.0, 0.0)
+        velocity: Vector::new(0.001, FRAC_PI_2)
     });
     world.particles.push(Particle {
         mass: 10.0,
         position: Vector::new(0.55, 0.0),
-        velocity: Vector::new(0.0013, FRAC_PI_2),
-        acceleration: Vector::new(0.0, 0.0)
+        velocity: Vector::new(0.0013, FRAC_PI_2)
     });
     for _ in 0..PARTICLE_COUNT {
         world.particles.push(Particle {
             mass: rng.gen_range(0.0..1.0),
             position: Vector::new(rng.gen_range(0.0..1.0), rng.gen_range(0.0..TAU)),
-            velocity: Vector::new(0.0, 0.0),
-            acceleration: Vector::new(0.0, 0.0)
+            velocity: Vector::new(0.0, 0.0)
         });
     }
 
