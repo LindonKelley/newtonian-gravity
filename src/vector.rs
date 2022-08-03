@@ -62,14 +62,14 @@ impl Add for Vector {
         let r2 = rhs.magnitude;
         let t1 = self.direction;
         let t2 = rhs.direction;
-        let r3 = f64::sqrt(
+        let r3 = f64::sqrt(f64::abs(
             r1 * r1 +
                 2.0 * r1 * r2 * f64::cos(t2 - t1) +
                 r2 * r2
-        );
+        ));
         let t3 = t1 + f64::atan2(
-            (r2 * f64::sin(t2 - t1)),
-                (r1 + r2 * f64::cos(t2 - t1))
+            r2 * f64::sin(t2 - t1),
+            r1 + r2 * f64::cos(t2 - t1)
         );
         Self {
             direction: t3,

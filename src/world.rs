@@ -18,7 +18,10 @@ impl World {
                 let b = self.particles[j];
                 let r_sq = Vector::distance_sq(&a.position, &b.position);
                 // Newtons law of universal gravitation: (G * m1 * m2) / r^2
-                let f = (6.674_30e-11 * a.mass * b.mass / r_sq) * time;
+                let mut f = (6.674_30e-11 * a.mass * b.mass / r_sq) * time;
+                if f.is_infinite() {
+                    f = 0.0;
+                }
                 {
                     let (x1, y1) = a.position.to_cartesian();
                     let (x2, y2) = b.position.to_cartesian();
