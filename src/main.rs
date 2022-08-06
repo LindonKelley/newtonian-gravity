@@ -21,10 +21,11 @@ mod periodic_logger;
 fn main() {
     initialize_logging();
 
-    const PARTICLE_COUNT: usize = 100;
-    const FRAME_COUNT: u32 = 240;
+    const PARTICLE_COUNT: usize = 1000;
+    const FRAME_COUNT: u32 = 4800;
     const SCALE: f64 = 500.0;
-    const TIME_SCALE: f64 = 10.0;
+    const TIME_SCALE: f64 = 1.0;
+    // maybe switch over to quality steps
     const TIME_STEP: f64 = 1.0;
     const SIZE: Option<(f64, f64)> = Some((1000.0, 1000.0));
 
@@ -48,7 +49,7 @@ fn main() {
     for _ in 0..PARTICLE_COUNT {
         world.particles.push(Particle {
             mass: rng.gen_range(0.0..1.0),
-            position: Vector::new(rng.gen_range(0.0..1.0), rng.gen_range(0.0..TAU)),
+            position: Vector::new(rng.gen_range(0.5..1.0), rng.gen_range(0.0..TAU)),
             velocity: Vector::new(0.0, 0.0)
         });
     }
@@ -59,7 +60,7 @@ fn main() {
     let mut periodic_logger = PeriodicLogger::new("simulating", Level::Info);
     for frame in 0..FRAME_COUNT {
         while time_scale_render < TIME_SCALE {
-            world.tick(TIME_STEP);
+            world.par_tick(TIME_STEP);
             time_scale_render += TIME_STEP;
         }
         mass_position_frames.push(world.get_mass_points());
