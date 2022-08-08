@@ -1,4 +1,4 @@
-use std::f64::consts::{FRAC_PI_2, PI, TAU};
+use std::f32::consts::{FRAC_PI_2, PI, TAU};
 use std::fs::File;
 use std::ops::Range;
 use image::codecs::gif::{GifEncoder, Repeat};
@@ -12,7 +12,7 @@ use log4rs::encode::pattern::PatternEncoder;
 use log4rs::Config;
 use crate::periodic_logger::PeriodicLogger;
 use crate::vector::Vector;
-use crate::world::{MassPoint, Particle, World};
+use crate::world::{GPUWorld, MassPoint, Particle, TestWorld, World};
 
 mod vector;
 mod world;
@@ -22,12 +22,32 @@ fn main() {
     initialize_logging();
 
     const PARTICLE_COUNT: usize = 1000;
-    const FRAME_COUNT: u32 = 4800;
-    const SCALE: f64 = 500.0;
-    const TIME_SCALE: f64 = 1.0;
+    const FRAME_COUNT: u32 = 240;
+    const SCALE: f32 = 500.0;
+    const TIME_SCALE: f32 = 20.0;
     // maybe switch over to quality steps
-    const TIME_STEP: f64 = 1.0;
-    const SIZE: Option<(f64, f64)> = Some((1000.0, 1000.0));
+    const TIME_STEP: f32 = 1.0;
+    const SIZE: Option<(f32, f32)> = Some((1000.0, 1000.0));
+
+    let mut gpu_world = GPUWorld::new(vec![
+        Particle {
+            mass: 10000.0,
+            position: Vector::new(0.0, 0.0),
+            velocity: Vector::new(0.0, 0.0)
+        },
+        Particle {
+            mass: 100.0,
+            position: Vector::new(0.50, 0.0),
+            velocity: Vector::new(0.001, FRAC_PI_2)
+        },
+        Particle {
+            mass: 10.0,
+            position: Vector::new(0.55, 0.0),
+            velocity: Vector::new(0.0013, FRAC_PI_2)
+        }
+    ]);
+    gpu_world.tick(1.0);
+    return;
 
     let mut rng = thread_rng();
     let mut world = World::new();
@@ -117,7 +137,7 @@ fn main() {
             draw_filled_circle_mut(
                 &mut image,
                 (px, py),
-                f64::cbrt(3.0 * mass / 4.0 * PI) as i32,
+                f32::cbrt(3.0 * mass / 4.0 * PI) as i32,
                 [255, 255, 255, 255].into()
             );
         }
@@ -127,7 +147,7 @@ fn main() {
     }
 }
 
-fn adjust_bounds(bounds: &mut Range<f64>, v: f64) {
+fn adjust_bounds(bounds: &mut Range<f32>, v: f32) {
     if v < bounds.start {
         bounds.start = v;
     } else if v > bounds.end {
