@@ -29,7 +29,7 @@ fn main() {
     const TIME_STEP: f32 = 1.0;
     const SIZE: Option<(f32, f32)> = Some((1000.0, 1000.0));
 
-    let mut gpu_world = GPUWorld::new(vec![
+    let gpu_world = GPUWorld::new(vec![
         Particle {
             mass: 10000.0,
             position: Vector::new(0.0, 0.0),
@@ -47,6 +47,30 @@ fn main() {
         }
     ]);
     gpu_world.tick(1.0);
+    let mut cpu_world = World::new();
+    cpu_world.particles.push(Particle {
+        mass: 10000.0,
+        position: Vector::new(0.0, 0.0),
+        velocity: Vector::new(0.0, 0.0)
+    });
+    cpu_world.particles.push(Particle {
+        mass: 100.0,
+        position: Vector::new(0.50, 0.0),
+        velocity: Vector::new(0.001, FRAC_PI_2)
+    });
+    cpu_world.particles.push(Particle {
+        mass: 10.0,
+        position: Vector::new(0.55, 0.0),
+        velocity: Vector::new(0.0013, FRAC_PI_2)
+    });
+    cpu_world.tick(1.0);
+    {
+        cpu_world.get_mass_points().into_iter()
+            .zip(gpu_world.get_mass_points())
+            .for_each(|(cpu, gpu)| {
+                assert_eq!(cpu.position, gpu.position);
+            });
+    }
     return;
 
     let mut rng = thread_rng();
