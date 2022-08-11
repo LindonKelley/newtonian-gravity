@@ -1,7 +1,7 @@
 use std::ops::{Add, AddAssign};
 use bytemuck::{Pod, Zeroable};
 
-#[derive(Default, Copy, Clone, Debug, Zeroable, Pod)]
+#[derive(Default, Copy, Clone, Debug, PartialEq, Zeroable, Pod)]
 #[repr(C)]
 pub struct Vector {
     pub direction: f32,

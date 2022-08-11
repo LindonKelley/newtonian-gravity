@@ -247,58 +247,6 @@ impl GPUWorld {
     }
 }
 
-pub struct TestWorld {
-    particles: Vec<Particle>
-}
-
-impl TestWorld {
-    pub fn new(particles: Vec<Particle>) -> Self {
-        Self { particles }
-    }
-
-    pub fn tick(&mut self, time: f32) {
-        let force_direction_length = self.particles.len() * (self.particles.len() - 1) / 2;
-        let mut force_directions = vec![ForceDirection::default(); force_direction_length];
-        for x in 0..1024 * 64 {
-            for y in 0..1024 * 64 {
-                let i = x;
-                let j = y;
-                if i < self.particles.len() && j < self.particles.len() && j >= i + 1 {
-                    let index = (self.particles.len() - i) * (self.particles.len() - i - 1) / 2 - (j - i);
-                    force_directions[index].direction = self.particles[i].mass * self.particles[j].mass * time;
-                }
-            }
-        }
-        let mut accelerations = vec![Vector::new(0.0, 0.0); self.particles.len()];
-        for i in 0..self.particles.len() {
-            for j in i + 1..self.particles.len() {
-                let index = (self.particles.len() - i) * (self.particles.len() - i - 1) / 2 - (j - i);
-                let ForceDirection { force: f, direction: d1 } = force_directions[index];
-                let d2 = d1 + PI;
-                let a = self.particles[i];
-                let b = self.particles[j];
-                accelerations[i] += Vector::new(f / a.mass, d1);
-                accelerations[j] += Vector::new(f / b.mass, d2);
-            }
-        }
-        for (i, particle) in self.particles.iter_mut().enumerate() {
-            particle.velocity.step(&accelerations[i], time);
-            particle.position.step(&particle.velocity, time);
-        }
-    }
-
-    pub fn get_mass_points(&self) -> Vec<MassPoint> {
-        let mut mass_points = Vec::with_capacity(self.particles.len());
-        for particle in &self.particles {
-            mass_points.push(MassPoint {
-                mass: particle.mass,
-                position: particle.position.to_cartesian()
-            })
-        }
-        mass_points
-    }
-}
-
 mod cs {
     vulkano_shaders::shader! {
                 ty: "compute",
@@ -370,15 +318,15 @@ struct ForceDirection {
 
 layout(local_size_x = 8, local_size_y = 8, local_size_z = 1) in;
 
-layout(set = 0, binding = 0) buffer Particles {
+layout(set = 0, binding = 0) readonly buffer Particles {
     Particle particles[];
 };
 
-layout(set = 0, binding = 1) buffer Time {
+layout(set = 0, binding = 1) readonly buffer Time {
     float time;
 };
 
-layout(set = 0, binding = 2) buffer ForceDirections {
+layout(set = 0, binding = 2) writeonly buffer ForceDirections {
     ForceDirection force_directions[];
 };
 
@@ -404,8 +352,57 @@ void main() {
     }
 }
 
+mod cs2 {
+    vulkano_shaders::shader! {
+                ty: "compute",
+                src: "
+#version 450
 
-#[derive(Copy, Clone, Debug)]
+struct Vector {
+    float direction;
+    float magnitude;
+};
+
+struct Particle {
+    float mass;
+    Vector position;
+    Vector velocity;
+};
+
+struct ForceDirection {
+    float force;
+    float direction;
+};
+
+layout(set = 0, binding = 0) readonly buffer Particles {
+    Particle particles[]; // todo likely error when checking for only length, may have to just pass in the particle length alone like before
+};
+
+layout(set = 0, binding = 1) readonly buffer ForceDirections {
+    ForceDirection force_directions[];
+};
+
+void main() {
+
+}
+"
+    }
+}
+
+mod cs3 {
+    vulkano_shaders::shader! {
+                ty: "compute",
+                src: "
+#version 450
+
+void main() {
+
+}
+"
+    }
+}
+
+#[derive(Copy, Clone, Debug, PartialEq)]
 pub struct MassPoint {
     pub mass: f32,
     pub position: (f32, f32)
