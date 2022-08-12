@@ -4,7 +4,6 @@ use std::num::NonZeroUsize;
 use std::ops::Range;
 use std::thread;
 use std::thread::available_parallelism;
-use std::time::Instant;
 use image::codecs::gif::{GifDecoder, GifEncoder, Repeat};
 use image::{AnimationDecoder, Frame, RgbaImage};
 use imageproc::drawing::draw_filled_circle_mut;
@@ -39,67 +38,42 @@ fn main() {
     output_gpu();
 }
 
-#[allow(unused)]
+#[allow(dead_code)]
 fn output_gpu() {
-    let particles = {
-        let mut rng = Pcg64Mcg::seed_from_u64(SEED);
-        let mut particles = Vec::with_capacity(PARTICLE_COUNT);
-        for _ in 0..PARTICLE_COUNT {
-            particles.push(Particle {
-                mass: rng.gen_range(0.0..1.0),
-                position: Vector::new(rng.gen_range(0.5..1.0), rng.gen_range(0.0..TAU)),
-                velocity: Vector::new(0.0, 0.0)
-            });
-        }
-        particles
-    };
-
-    let world = GPUWorld::new(particles);
+    let world = GPUWorld::new(generate_particles());
     tick_and_output_gif(world, |world, t| world.tick(t), GPUWorld::get_mass_points, "gpu");
 }
 
-#[allow(unused)]
+#[allow(dead_code)]
 fn compare_outputs() {
-    let particles = {
-        let mut rng = Pcg64Mcg::seed_from_u64(SEED);
-        let mut particles = Vec::with_capacity(PARTICLE_COUNT);
-        for _ in 0..PARTICLE_COUNT {
-            particles.push(Particle {
-                mass: rng.gen_range(0.0..1.0),
-                position: Vector::new(rng.gen_range(0.5..1.0), rng.gen_range(0.0..TAU)),
-                velocity: Vector::new(0.0, 0.0)
-            });
-        }
-        particles
-    };
-
+    let particles = generate_particles();
     let particles_a = particles.clone();
     let particles_b = particles.clone();
     let particles_c = particles;
 
     ThreadPoolBuilder::new()
-        .num_threads(
-            usize::min(
-            available_parallelism()
-                .unwrap_or(NonZeroUsize::new(1).unwrap())
-                .get() - 1,
-            1)
-        )
-        .build_global()
-        .unwrap();
+    .num_threads(
+    usize::min(
+    available_parallelism()
+    .unwrap_or(NonZeroUsize::new(1).unwrap())
+    .get() - 1,
+    1)
+    )
+    .build_global()
+    .unwrap();
     let handles = [
-        thread::spawn(|| {
-            let world = World { particles: particles_a };
-            tick_and_output_gif(world, World::tick, World::get_mass_points, "single");
-        }),
-        thread::spawn(|| {
-            let world = World { particles: particles_b };
-            tick_and_output_gif(world, World::par_tick, World::get_mass_points, "multi");
-        }),
-        thread::spawn(|| {
-            let world = GPUWorld::new(particles_c);
-            tick_and_output_gif(world, |world, t| world.tick(t), GPUWorld::get_mass_points, "gpu");
-        })
+    thread::spawn(|| {
+        let world = World { particles: particles_a };
+        tick_and_output_gif(world, World::tick, World::get_mass_points, "single");
+    }),
+    thread::spawn(|| {
+        let world = World { particles: particles_b };
+        tick_and_output_gif(world, World::par_tick, World::get_mass_points, "multi");
+    }),
+    thread::spawn(|| {
+        let world = GPUWorld::new(particles_c);
+        tick_and_output_gif(world, |world, t| world.tick(t), GPUWorld::get_mass_points, "gpu");
+    })
     ];
     for handle in handles {
         handle.join().unwrap();
@@ -113,27 +87,40 @@ fn compare_outputs() {
         merged.set_repeat(Repeat::Infinite).unwrap();
         let mut periodic_logger = PeriodicLogger::new("exporting merged", Level::Info);
         single.into_frames()
-            .zip(multi.into_frames())
-            .zip(gpu.into_frames())
-            .map(|((single_frame_result, multi_frame_result), gpu_frame_result)| {
-                (single_frame_result.unwrap().into_buffer(), multi_frame_result.unwrap().into_buffer(), gpu_frame_result.unwrap().into_buffer())
-            })
-            .enumerate()
-            .for_each(|(frame, (single_frame, multi_frame, gpu_frame))| {
-                periodic_logger.log(format!("{} / {}", frame, FRAME_COUNT));
-                let (width, height) = (single_frame.width(), single_frame.height());
-                let mut image = RgbaImage::new(width, height);
-                for y in 0..height {
-                    for x in 0..width {
-                        let r = single_frame[(x, y)].0[0];
-                        let g = multi_frame[(x, y)].0[1];
-                        let b = gpu_frame[(x, y)].0[2];
-                        image[(x, y)].0 = [r, g, b, 255];
-                    }
+        .zip(multi.into_frames())
+        .zip(gpu.into_frames())
+        .map(|((single_frame_result, multi_frame_result), gpu_frame_result)| {
+            (single_frame_result.unwrap().into_buffer(), multi_frame_result.unwrap().into_buffer(), gpu_frame_result.unwrap().into_buffer())
+        })
+        .enumerate()
+        .for_each(|(frame, (single_frame, multi_frame, gpu_frame))| {
+            periodic_logger.log(format!("{} / {}", frame, FRAME_COUNT));
+            let (width, height) = (single_frame.width(), single_frame.height());
+            let mut image = RgbaImage::new(width, height);
+            for y in 0..height {
+                for x in 0..width {
+                    let r = single_frame[(x, y)].0[0];
+                    let g = multi_frame[(x, y)].0[1];
+                    let b = gpu_frame[(x, y)].0[2];
+                    image[(x, y)].0 = [r, g, b, 255];
                 }
-                merged.encode_frame(Frame::new(image)).unwrap();
-            });
+            }
+            merged.encode_frame(Frame::new(image)).unwrap();
+        });
     }
+}
+
+fn generate_particles() -> Vec<Particle> {
+    let mut rng = Pcg64Mcg::seed_from_u64(SEED);
+    let mut particles = Vec::with_capacity(PARTICLE_COUNT);
+    for _ in 0..PARTICLE_COUNT {
+        particles.push(Particle {
+            mass: rng.gen_range(0.0..1.0),
+            position: Vector::new(rng.gen_range(0.5..1.0), rng.gen_range(0.0..TAU)),
+            velocity: Vector::new(0.0, 0.0)
+        });
+    }
+    particles
 }
 
 fn tick_and_output_gif<T, TF: FnMut(&mut T, f32), MPG: FnMut(&T) -> Vec<MassPoint>>(mut world: T, mut tick_function: TF, mut mass_point_getter: MPG, name: &str) {
@@ -220,6 +207,7 @@ fn adjust_bounds(bounds: &mut Range<f32>, v: f32) {
     }
 }
 
+#[deny(dead_code)]
 fn initialize_logging() {
     let stdout = ConsoleAppender::builder()
         .encoder(Box::new(PatternEncoder::new("{m}{n}")))

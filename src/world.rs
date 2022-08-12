@@ -2,7 +2,7 @@ use std::f32::consts::PI;
 use std::sync::Arc;
 use rayon::iter::{IntoParallelRefMutIterator, IndexedParallelIterator, ParallelIterator};
 use bytemuck::{Pod, Zeroable};
-use vulkano::buffer::{BufferUsage, CpuAccessibleBuffer, DeviceLocalBuffer, ImmutableBuffer};
+use vulkano::buffer::{BufferUsage, CpuAccessibleBuffer, ImmutableBuffer};
 use vulkano::command_buffer::{AutoCommandBufferBuilder, CommandBufferUsage};
 use vulkano::descriptor_set::{PersistentDescriptorSet, WriteDescriptorSet};
 use vulkano::device::{Device, DeviceCreateInfo, Queue, QueueCreateInfo};
@@ -10,7 +10,7 @@ use vulkano::device::physical::PhysicalDevice;
 use vulkano::instance::{Instance, InstanceCreateInfo};
 use vulkano::pipeline::{ComputePipeline, Pipeline, PipelineBindPoint};
 use vulkano::shader::ShaderModule;
-use vulkano::{DeviceSize, sync};
+use vulkano::DeviceSize;
 use vulkano::sync::GpuFuture;
 use crate::vector::Vector;
 
@@ -204,9 +204,6 @@ impl GPUWorld {
         time_buffer_future
             .then_signal_fence_and_flush()
             .unwrap()
-            .wait(None)
-            .unwrap();
-        sync::now(self.device.clone())
             .then_execute(self.queue.clone(), command_buffer)
             .unwrap()
             .then_signal_fence_and_flush()
