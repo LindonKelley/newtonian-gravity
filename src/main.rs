@@ -1,11 +1,14 @@
-use std::f32::consts::{FRAC_PI_2, PI, TAU};
+use std::f32::consts::{PI, TAU};
 use std::fs::File;
+use std::num::NonZeroUsize;
 use std::ops::Range;
 use std::thread;
+use std::thread::available_parallelism;
+use std::time::Instant;
 use image::codecs::gif::{GifDecoder, GifEncoder, Repeat};
 use image::{AnimationDecoder, Frame, RgbaImage};
 use imageproc::drawing::draw_filled_circle_mut;
-use rand::{Rng, SeedableRng, thread_rng};
+use rand::{Rng, SeedableRng};
 use log::{Level, LevelFilter};
 use log4rs::append::console::ConsoleAppender;
 use log4rs::config::{Appender, Logger, Root};
@@ -21,6 +24,7 @@ mod vector;
 mod world;
 mod periodic_logger;
 
+const SEED: u64 = 23;
 const PARTICLE_COUNT: usize = 100;
 const FRAME_COUNT: usize = 240;
 const SCALE: f32 = 500.0;
@@ -32,13 +36,32 @@ const SIZE: Option<(f32, f32)> = Some((1000.0, 1000.0));
 fn main() {
     initialize_logging();
 
-    compare_outputs();
+    output_gpu();
+}
+
+#[allow(unused)]
+fn output_gpu() {
+    let particles = {
+        let mut rng = Pcg64Mcg::seed_from_u64(SEED);
+        let mut particles = Vec::with_capacity(PARTICLE_COUNT);
+        for _ in 0..PARTICLE_COUNT {
+            particles.push(Particle {
+                mass: rng.gen_range(0.0..1.0),
+                position: Vector::new(rng.gen_range(0.5..1.0), rng.gen_range(0.0..TAU)),
+                velocity: Vector::new(0.0, 0.0)
+            });
+        }
+        particles
+    };
+
+    let world = GPUWorld::new(particles);
+    tick_and_output_gif(world, |world, t| world.tick(t), GPUWorld::get_mass_points, "gpu");
 }
 
 #[allow(unused)]
 fn compare_outputs() {
     let particles = {
-        let mut rng = Pcg64Mcg::seed_from_u64(23);
+        let mut rng = Pcg64Mcg::seed_from_u64(SEED);
         let mut particles = Vec::with_capacity(PARTICLE_COUNT);
         for _ in 0..PARTICLE_COUNT {
             particles.push(Particle {
@@ -54,7 +77,16 @@ fn compare_outputs() {
     let particles_b = particles.clone();
     let particles_c = particles;
 
-    ThreadPoolBuilder::new().num_threads(0).build_global().unwrap();
+    ThreadPoolBuilder::new()
+        .num_threads(
+            usize::min(
+            available_parallelism()
+                .unwrap_or(NonZeroUsize::new(1).unwrap())
+                .get() - 1,
+            1)
+        )
+        .build_global()
+        .unwrap();
     let handles = [
         thread::spawn(|| {
             let world = World { particles: particles_a };
@@ -79,13 +111,16 @@ fn compare_outputs() {
         let gpu = GifDecoder::new(File::open("output/gpu.gif").unwrap()).unwrap();
         let mut merged = GifEncoder::new(File::create("output/merged.gif").unwrap());
         merged.set_repeat(Repeat::Infinite).unwrap();
+        let mut periodic_logger = PeriodicLogger::new("exporting merged", Level::Info);
         single.into_frames()
             .zip(multi.into_frames())
             .zip(gpu.into_frames())
             .map(|((single_frame_result, multi_frame_result), gpu_frame_result)| {
                 (single_frame_result.unwrap().into_buffer(), multi_frame_result.unwrap().into_buffer(), gpu_frame_result.unwrap().into_buffer())
             })
-            .for_each(|(single_frame, multi_frame, gpu_frame)| {
+            .enumerate()
+            .for_each(|(frame, (single_frame, multi_frame, gpu_frame))| {
+                periodic_logger.log(format!("{} / {}", frame, FRAME_COUNT));
                 let (width, height) = (single_frame.width(), single_frame.height());
                 let mut image = RgbaImage::new(width, height);
                 for y in 0..height {
@@ -101,16 +136,16 @@ fn compare_outputs() {
     }
 }
 
-fn tick_and_output_gif<T, TF: FnMut(&mut T, f32), MPG: FnMut(&T) -> Vec<MassPoint>>(mut obj: T, mut tick_function: TF, mut mass_point_getter: MPG, name: &str) {
+fn tick_and_output_gif<T, TF: FnMut(&mut T, f32), MPG: FnMut(&T) -> Vec<MassPoint>>(mut world: T, mut tick_function: TF, mut mass_point_getter: MPG, name: &str) {
     let mut periodic_logger = PeriodicLogger::new(&format!("simulating {}", name), Level::Info);
     let mut time_scale_render = 0.0;
     let mut mass_position_frames = Vec::with_capacity(FRAME_COUNT);
     for frame in 0..FRAME_COUNT {
         while time_scale_render < TIME_SCALE {
-            tick_function(&mut obj, TIME_STEP);
+            tick_function(&mut world, TIME_STEP);
             time_scale_render += TIME_STEP;
         }
-        mass_position_frames.push(mass_point_getter(&obj));
+        mass_position_frames.push(mass_point_getter(&world));
         time_scale_render -= TIME_SCALE;
         periodic_logger.log(format!("{} / {}", frame, FRAME_COUNT));
     }

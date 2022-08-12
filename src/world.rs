@@ -196,8 +196,7 @@ impl GPUWorld {
                 0,
                 set
             )
-            // todo fix group counts
-            .dispatch([16, 16, 1])
+            .dispatch([(force_direction_buffer_length / 64 + 1) as u32, 1, 1])
             .unwrap();
 
         let command_buffer = builder.build().unwrap();
@@ -316,7 +315,34 @@ struct ForceDirection {
     float direction;
 };
 
-layout(local_size_x = 8, local_size_y = 8, local_size_z = 1) in;
+uint leading_zeros(uint n) {
+    uint M = 1 << 31;
+    for (uint c = 0; c < 32; c++) {
+        if ((n & M) == M)
+            return c;
+        n = n << 1;
+    }
+    return 32;
+}
+
+uint sqrt(uint n) {
+    uint MAX_SHIFT = 31;
+    uint shift = (MAX_SHIFT - leading_zeros(n)) & ~1u;
+    uint bit = 1 << shift;
+    uint result = 0;
+    while (bit != 0) {
+        if (n >= (result + bit)) {
+            n = n - (result + bit);
+            result = (result >> 1) + bit;
+        } else {
+            result = result >> 1;
+        }
+        bit = bit >> 2;
+    }
+    return result;
+}
+
+layout(local_size_x = 64, local_size_y = 1, local_size_z = 1) in;
 
 layout(set = 0, binding = 0) readonly buffer Particles {
     Particle particles[];
@@ -331,20 +357,20 @@ layout(set = 0, binding = 2) writeonly buffer ForceDirections {
 };
 
 void main() {
-    uint i = gl_GlobalInvocationID.x;
-    uint j = gl_GlobalInvocationID.y;
-    if (i < particles.length() && j < particles.length() && j >= i + 1) {
-        uint index = (particles.length() - i) * (particles.length() - i - 1) / 2 - (j - i);
+    uint x = gl_GlobalInvocationID.x;
+    if (x < force_directions.length()) {
+        uint i = particles.length() - 1 - (1 + sqrt(1 + 8 * x)) / 2;
+        uint j = (particles.length() - i) * (particles.length() - i - 1) / 2 + i - x;
         Particle a = particles[i];
         Particle b = particles[j];
         float r_sq = vector_distance_sq(a.position, b.position);
         float f = (6.67430e-11 * a.mass * b.mass / r_sq) * time;
-        force_directions[index].force = isinf(f) ? 0.0 : f;
+        force_directions[x].force = isinf(f) ? 0.0 : f;
         {
             vec2 p1 = vector_to_cartesian(a.position);
             vec2 p2 = vector_to_cartesian(b.position);
             float d1 = atan(p2.y - p1.y, p2.x - p1.x);
-            force_directions[index].direction = d1;
+            force_directions[x].direction = d1;
         }
     }
 }
