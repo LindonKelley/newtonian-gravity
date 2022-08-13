@@ -2,7 +2,7 @@ use std::f32::consts::PI;
 use std::sync::Arc;
 use rayon::iter::{IntoParallelRefMutIterator, IndexedParallelIterator, ParallelIterator};
 use bytemuck::{Pod, Zeroable};
-use vulkano::buffer::{BufferUsage, CpuAccessibleBuffer, ImmutableBuffer};
+use vulkano::buffer::{BufferUsage, CpuAccessibleBuffer, DeviceLocalBuffer, ImmutableBuffer};
 use vulkano::command_buffer::{AutoCommandBufferBuilder, CommandBufferUsage};
 use vulkano::descriptor_set::{PersistentDescriptorSet, WriteDescriptorSet};
 use vulkano::device::{Device, DeviceCreateInfo, Queue, QueueCreateInfo};
@@ -10,7 +10,7 @@ use vulkano::device::physical::PhysicalDevice;
 use vulkano::instance::{Instance, InstanceCreateInfo};
 use vulkano::pipeline::{ComputePipeline, Pipeline, PipelineBindPoint};
 use vulkano::shader::ShaderModule;
-use vulkano::DeviceSize;
+use vulkano::{DeviceSize, sync};
 use vulkano::sync::GpuFuture;
 use crate::vector::Vector;
 
@@ -42,8 +42,8 @@ impl World {
                     let d1 = f32::atan2(y2 - y1, x2 - x1);
                     let d2 = f32::atan2(y1 - y2, x1 - x2);
                     // f = ma
-                    accelerations[i] += Vector::new(f / a.mass, d1);
-                    accelerations[j] += Vector::new(f / b.mass, d2);
+                    accelerations[i] += Vector::new(d1, f / a.mass);
+                    accelerations[j] += Vector::new(d2, f / b.mass);
                 }
             }
         }
@@ -95,8 +95,8 @@ impl World {
                     let d1 = f32::atan2(y2 - y1, x2 - x1);
                     let d2 = f32::atan2(y1 - y2, x1 - x2);
                     // f = ma
-                    accelerations[i] += Vector::new(f / a.mass, d1);
-                    accelerations[j] += Vector::new(f / b.mass, d2);
+                    accelerations[i] += Vector::new(d1, f / a.mass);
+                    accelerations[j] += Vector::new(d2, f / b.mass);
                 }
             }
             accelerations
@@ -119,7 +119,8 @@ impl World {
 pub struct GPUWorld {
     device: Arc<Device>,
     queue: Arc<Queue>,
-    compute_pipeline: Arc<ComputePipeline>,
+    force_direction_pipeline: Arc<ComputePipeline>,
+    acceleration_pipeline: Arc<ComputePipeline>,
     particles: Arc<CpuAccessibleBuffer<[Particle]>>
 }
 
@@ -145,36 +146,41 @@ impl GPUWorld {
         let particles = CpuAccessibleBuffer::from_iter(device.clone(), BufferUsage::all(), false, particles)
             .expect("failed to create particle buffer");
         // intellij rust plugin failing to auto detect what type this is
-        let shader: Arc<ShaderModule> = cs::load(device.clone())
+        let force_direction_shader: Arc<ShaderModule> = force_direction_compute_shader::load(device.clone())
             .expect("failed to create shader");
-        let compute_pipeline = ComputePipeline::new(
+        let force_direction_pipeline = ComputePipeline::new(
             device.clone(),
-            shader.entry_point("main").unwrap(),
+            force_direction_shader.entry_point("main").unwrap(),
             &(),
             None,
             |_| {}
         ).expect("failed to create compute pipeline");
-        Self { device, queue, compute_pipeline, particles }
+        let acceleration_compute_shader: Arc<ShaderModule> = acceleration_compute_shader::load(device.clone())
+            .unwrap();
+        let acceleration_pipeline = ComputePipeline::new(
+            device.clone(),
+            acceleration_compute_shader.entry_point("main").unwrap(),
+            &(),
+            None,
+            |_| {}
+        ).unwrap();
+        Self {
+            device,
+            queue,
+            force_direction_pipeline,
+            acceleration_pipeline,
+            particles
+        }
     }
 
     pub fn tick(&self, time: f32) {
-        let layout = self.compute_pipeline.layout().set_layouts().first().unwrap();
-        // todo switch over to caching length
+        let layout = self.force_direction_pipeline.layout().set_layouts().first().unwrap();
         let particle_length = self.particles.read().unwrap().len();
         let force_direction_buffer_length = particle_length * (particle_length - 1) / 2;
         let (time_buffer, time_buffer_future) = ImmutableBuffer::from_data(time, BufferUsage::all(), self.queue.clone())
             .expect("unable to create time buffer");
-        // todo for the near future when I push more tick processing to GPU
-        //let force_direction_buffer: Arc<DeviceLocalBuffer<[Vector]>> = DeviceLocalBuffer::array(self.device.clone(), force_direction_buffer_length as DeviceSize, BufferUsage::all(), self.device.active_queue_families())
-        //    .expect("unable to create force direction buffer");
-
-        //let force_direction_buffer = CpuAccessibleBuffer::from_iter(self.device.clone(), BufferUsage::all(), false, vec![ForceDirection::default(); force_direction_buffer_length])
-        //    .expect("unable to create force direction buffer");
-
-        let force_direction_buffer = unsafe {
-            CpuAccessibleBuffer::uninitialized_array(self.device.clone(), force_direction_buffer_length as DeviceSize, BufferUsage::all(), false)
-                .expect("unable to create force direction buffer")
-        };
+        let force_direction_buffer: Arc<DeviceLocalBuffer<[Vector]>> = DeviceLocalBuffer::array(self.device.clone(), force_direction_buffer_length as DeviceSize, BufferUsage::all(), self.device.active_queue_families())
+            .expect("unable to create force direction buffer");
         let set = PersistentDescriptorSet::new(
             layout.clone(),
             [
@@ -183,51 +189,58 @@ impl GPUWorld {
                 WriteDescriptorSet::buffer(2, force_direction_buffer.clone())
             ]
         ).unwrap();
-        let mut builder = AutoCommandBufferBuilder::primary(
-            self.device.clone(),
-            self.queue.family(),
-            CommandBufferUsage::OneTimeSubmit
-        ).unwrap();
-        builder
-            .bind_pipeline_compute(self.compute_pipeline.clone())
-            .bind_descriptor_sets(
-                PipelineBindPoint::Compute,
-                self.compute_pipeline.layout().clone(),
-                0,
-                set
-            )
-            .dispatch([(force_direction_buffer_length / 64 + 1) as u32, 1, 1])
-            .unwrap();
+        let force_direction_command_buffer = {
+            let mut builder = AutoCommandBufferBuilder::primary(
+                self.device.clone(),
+                self.queue.family(),
+                CommandBufferUsage::OneTimeSubmit
+            ).unwrap();
+            builder
+                .bind_pipeline_compute(self.force_direction_pipeline.clone())
+                .bind_descriptor_sets(
+                    PipelineBindPoint::Compute,
+                    self.force_direction_pipeline.layout().clone(),
+                    0,
+                    set.clone()
+                )
+                .dispatch([(force_direction_buffer_length / 64 + 1) as u32, 1, 1])
+                .unwrap();
+            builder.build().unwrap()
+        };
 
-        let command_buffer = builder.build().unwrap();
+        let acceleration_command_buffer = {
+            let mut builder = AutoCommandBufferBuilder::primary(
+                self.device.clone(),
+                self.queue.family(),
+                CommandBufferUsage::OneTimeSubmit
+            ).unwrap();
+            builder
+                .bind_pipeline_compute(self.acceleration_pipeline.clone())
+                .bind_descriptor_sets(
+                    PipelineBindPoint::Compute,
+                    self.acceleration_pipeline.layout().clone(),
+                    0,
+                    set.clone()
+                )
+                .dispatch([(particle_length / 64 + 1) as u32, 1, 1])
+                .unwrap();
+            builder.build().unwrap()
+        };
 
         time_buffer_future
             .then_signal_fence_and_flush()
             .unwrap()
-            .then_execute(self.queue.clone(), command_buffer)
+            .then_execute(self.queue.clone(), force_direction_command_buffer)
+            .unwrap()
+            // I do not know if this is required
+            .then_signal_semaphore_and_flush()
+            .unwrap()
+            .then_execute_same_queue(acceleration_command_buffer)
             .unwrap()
             .then_signal_fence_and_flush()
             .unwrap()
             .wait(None)
             .unwrap();
-        let force_directions = force_direction_buffer.read().unwrap();
-        let mut accelerations = vec![Vector::new(0.0, 0.0); particle_length];
-        let mut particles = self.particles.write().unwrap();
-        for i in 0..particle_length {
-            for j in i + 1..particle_length {
-                let index = (particle_length - i) * (particle_length - i - 1) / 2 - (j - i);
-                let ForceDirection { force: f, direction: d1 } = force_directions[index];
-                let d2 = d1 + PI;
-                let a = particles[i];
-                let b = particles[j];
-                accelerations[i] += Vector::new(f / a.mass, d1);
-                accelerations[j] += Vector::new(f / b.mass, d2);
-            }
-        }
-        for (i, particle) in particles.iter_mut().enumerate() {
-            particle.velocity.step(&accelerations[i], time);
-            particle.position.step(&particle.velocity, time);
-        }
     }
 
     pub fn get_mass_points(&self) -> Vec<MassPoint> {
@@ -243,7 +256,7 @@ impl GPUWorld {
     }
 }
 
-mod cs {
+mod force_direction_compute_shader {
     vulkano_shaders::shader! {
                 ty: "compute",
                 src: "
@@ -375,7 +388,7 @@ void main() {
     }
 }
 
-mod cs2 {
+mod acceleration_compute_shader {
     vulkano_shaders::shader! {
                 ty: "compute",
                 src: "
@@ -384,6 +397,53 @@ mod cs2 {
 struct Vector {
     float direction;
     float magnitude;
+};
+
+Vector vector_add(Vector self, Vector rhs) {
+        float r1 = self.magnitude;
+        float r2 = rhs.magnitude;
+        float t1 = self.direction;
+        float t2 = rhs.direction;
+        float r3 = sqrt(abs(
+            r1 * r1 +
+                2.0 * r1 * r2 * cos(t2 - t1) +
+                r2 * r2
+        ));
+        float t3 = t1 + atan(
+            r2 * sin(t2 - t1),
+            r1 + r2 * cos(t2 - t1)
+        );
+        return Vector(t3, r3);
+}
+
+Vector vector_scale(Vector self, float scale) {
+    return Vector(self.direction, self.magnitude * scale);
+}
+
+void vector_step(inout Vector self, Vector derivative, float time) {
+    derivative = vector_scale(derivative, time);
+    self = vector_add(self, derivative);
+}
+
+vec2 vector_to_cartesian(Vector self) {
+    float x = self.magnitude * cos(self.direction);
+    float y = self.magnitude * sin(self.direction);
+    return vec2(x, y);
+}
+
+float vector_distance_sq(Vector self, Vector other) {
+    float r1 = self.magnitude;
+    float r2 = other.magnitude;
+    float t1 = self.direction;
+    float t2 = other.direction;
+    return r1 * r1 +
+        r2 * r2 -
+        2.0 * r1 * r2 * cos(t1 - t2);
+}
+
+struct MassPoint {
+    float mass;
+    vec2 position;
 };
 
 struct Particle {
@@ -397,29 +457,48 @@ struct ForceDirection {
     float direction;
 };
 
-layout(set = 0, binding = 0) readonly buffer Particles {
-    Particle particles[]; // todo likely error when checking for only length, may have to just pass in the particle length alone like before
+layout(local_size_x = 64, local_size_y = 1, local_size_z = 1) in;
+
+layout(set = 0, binding = 0) buffer Particles {
+    Particle particles[];
 };
 
-layout(set = 0, binding = 1) readonly buffer ForceDirections {
+layout(set = 0, binding = 1) readonly buffer Time {
+    float time;
+};
+
+layout(set = 0, binding = 2) readonly buffer ForceDirections {
     ForceDirection force_directions[];
 };
 
+// if GPU groups are executed in SIMD as I've been reading, then this function
+// could have very poor performance due to many group cycles being completely NOP
+// because of other members of the group still working on the first for loop
+//
+// I will look into if this is actually an issue, and fixing it if, so in the
+// future, but this will be good enough for now
 void main() {
-
-}
-"
+    uint p = gl_GlobalInvocationID.x;
+    if (p < particles.length()) {
+        float m = particles[p].mass;
+        Vector acceleration = Vector(0.0, 0.0);
+        for (uint i = 0; i < p; i++) {
+            uint x = (particles.length() - i) * (particles.length() - i - 1) / 2 - (p - i);
+            float d = force_directions[x].direction + 3.14159265358979323846264338327950288;
+            float f = force_directions[x].force;
+            if (!isinf(f))
+                acceleration = vector_add(acceleration, Vector(d, f / m));
+        }
+        for (uint j = p+1; j < particles.length(); j++) {
+            uint x = (particles.length() - p) * (particles.length() - p - 1) / 2 - (j - p);
+            float d = force_directions[x].direction;
+            float f = force_directions[x].force;
+            if (!isinf(f))
+                acceleration = vector_add(acceleration, Vector(d, f / m));
+        }
+        vector_step(particles[p].velocity, acceleration, time);
+        vector_step(particles[p].position, particles[p].velocity, time);
     }
-}
-
-mod cs3 {
-    vulkano_shaders::shader! {
-                ty: "compute",
-                src: "
-#version 450
-
-void main() {
-
 }
 "
     }

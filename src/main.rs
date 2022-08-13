@@ -1,4 +1,4 @@
-use std::f32::consts::{PI, TAU};
+use std::f32::consts::{FRAC_PI_2, PI, TAU};
 use std::fs::File;
 use std::num::NonZeroUsize;
 use std::ops::Range;
@@ -31,22 +31,23 @@ const TIME_SCALE: f32 = 20.0;
 // maybe switch over to quality steps
 const TIME_STEP: f32 = 1.0;
 const SIZE: Option<(f32, f32)> = Some((1000.0, 1000.0));
+const PARTICLE_GENERATOR: fn() -> Vec<Particle> = generate_particles;
 
 fn main() {
     initialize_logging();
 
-    output_gpu();
+    compare_outputs();
 }
 
 #[allow(dead_code)]
 fn output_gpu() {
-    let world = GPUWorld::new(generate_particles());
+    let world = GPUWorld::new(PARTICLE_GENERATOR());
     tick_and_output_gif(world, |world, t| world.tick(t), GPUWorld::get_mass_points, "gpu");
 }
 
 #[allow(dead_code)]
 fn compare_outputs() {
-    let particles = generate_particles();
+    let particles = PARTICLE_GENERATOR();
     let particles_a = particles.clone();
     let particles_b = particles.clone();
     let particles_c = particles;
@@ -110,16 +111,38 @@ fn compare_outputs() {
     }
 }
 
+#[allow(dead_code)]
 fn generate_particles() -> Vec<Particle> {
     let mut rng = Pcg64Mcg::seed_from_u64(SEED);
     let mut particles = Vec::with_capacity(PARTICLE_COUNT);
     for _ in 0..PARTICLE_COUNT {
         particles.push(Particle {
             mass: rng.gen_range(0.0..1.0),
-            position: Vector::new(rng.gen_range(0.5..1.0), rng.gen_range(0.0..TAU)),
+            position: Vector::new(rng.gen_range(0.0..TAU), rng.gen_range(0.5..1.0)),
             velocity: Vector::new(0.0, 0.0)
         });
     }
+    particles
+}
+
+#[allow(dead_code)]
+fn generate_3_body() -> Vec<Particle> {
+    let mut particles = Vec::with_capacity(PARTICLE_COUNT);
+    particles.push(Particle {
+        mass: 10000.0,
+        position: Vector::new(0.0, 0.0),
+        velocity: Vector::new(0.0, 0.0)
+    });
+    particles.push(Particle {
+        mass: 100.0,
+        position: Vector::new(0.0, 0.50),
+        velocity: Vector::new(FRAC_PI_2, 0.001)
+    });
+    particles.push(Particle {
+        mass: 10.0,
+        position: Vector::new(0.0, 0.55),
+        velocity: Vector::new(FRAC_PI_2, 0.0013)
+    });
     particles
 }
 

@@ -9,7 +9,7 @@ pub struct Vector {
 }
 
 impl Vector {
-    pub fn new(magnitude: f32, direction: f32) -> Self {
+    pub fn new(direction: f32, magnitude: f32) -> Self {
         Self { direction, magnitude }
     }
 
