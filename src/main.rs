@@ -54,7 +54,7 @@ fn compare_outputs() {
 
     ThreadPoolBuilder::new()
     .num_threads(
-    usize::min(
+    usize::max(
     available_parallelism()
     .unwrap_or(NonZeroUsize::new(1).unwrap())
     .get() - 1,

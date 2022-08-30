@@ -10,7 +10,7 @@ use vulkano::device::physical::PhysicalDevice;
 use vulkano::instance::{Instance, InstanceCreateInfo};
 use vulkano::pipeline::{ComputePipeline, Pipeline, PipelineBindPoint};
 use vulkano::shader::ShaderModule;
-use vulkano::{DeviceSize, sync};
+use vulkano::DeviceSize;
 use vulkano::sync::GpuFuture;
 use crate::vector::Vector;
 
@@ -85,7 +85,7 @@ impl World {
                 let b = particles[j];
                 let r_sq = Vector::distance_sq(&a.position, &b.position);
                 // Newtons law of universal gravitation: (G * m1 * m2) / r^2
-                let mut f = (6.674_30e-11 * a.mass * b.mass / r_sq) * time;
+                let mut f = (6.67430e-11 * a.mass * b.mass / r_sq) * time;
                 if f.is_infinite() {
                     f = 0.0;
                 }
