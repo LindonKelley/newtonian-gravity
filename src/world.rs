@@ -32,15 +32,14 @@ impl World {
                 let b = self.particles[j];
                 let r_sq = Vector::distance_sq(&a.position, &b.position);
                 // Newtons law of universal gravitation: (G * m1 * m2) / r^2
-                let mut f = (6.67430e-11 * a.mass * b.mass / r_sq) * time;
+                let f = (6.67430e-11 * a.mass * b.mass / r_sq) * time;
                 if f.is_infinite() {
-                    f = 0.0;
-                }
-                {
+                    continue
+                } else {
                     let (x1, y1) = a.position.to_cartesian();
                     let (x2, y2) = b.position.to_cartesian();
                     let d1 = f32::atan2(y2 - y1, x2 - x1);
-                    let d2 = f32::atan2(y1 - y2, x1 - x2);
+                    let d2 = d1 + PI;
                     // f = ma
                     accelerations[i] += Vector::new(d1, f / a.mass);
                     accelerations[j] += Vector::new(d2, f / b.mass);
@@ -85,15 +84,14 @@ impl World {
                 let b = particles[j];
                 let r_sq = Vector::distance_sq(&a.position, &b.position);
                 // Newtons law of universal gravitation: (G * m1 * m2) / r^2
-                let mut f = (6.67430e-11 * a.mass * b.mass / r_sq) * time;
+                let f = (6.67430e-11 * a.mass * b.mass / r_sq) * time;
                 if f.is_infinite() {
-                    f = 0.0;
-                }
-                {
+                    continue
+                } else {
                     let (x1, y1) = a.position.to_cartesian();
                     let (x2, y2) = b.position.to_cartesian();
                     let d1 = f32::atan2(y2 - y1, x2 - x1);
-                    let d2 = f32::atan2(y1 - y2, x1 - x2);
+                    let d2 = d1 + PI;
                     // f = ma
                     accelerations[i] += Vector::new(d1, f / a.mass);
                     accelerations[j] += Vector::new(d2, f / b.mass);
@@ -375,8 +373,10 @@ void main() {
         Particle b = particles[j];
         float r_sq = vector_distance_sq(a.position, b.position);
         float f = (6.67430e-11 * a.mass * b.mass / r_sq) * time;
-        force_directions[x].force = isinf(f) ? 0.0 : f;
-        {
+        if (isinf(f)) {
+            force_directions[x].force = 0.0;
+        } else {
+            force_directions[x].force = f;
             vec2 p1 = vector_to_cartesian(a.position);
             vec2 p2 = vector_to_cartesian(b.position);
             float d1 = atan(p2.y - p1.y, p2.x - p1.x);
