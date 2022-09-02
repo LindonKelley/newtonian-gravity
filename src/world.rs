@@ -1,4 +1,5 @@
 use std::f32::consts::PI;
+use std::num::NonZeroU16;
 use std::sync::Arc;
 use rayon::iter::{IntoParallelRefMutIterator, IndexedParallelIterator, ParallelIterator};
 use bytemuck::{Pod, Zeroable};
@@ -23,32 +24,35 @@ impl World {
         Self { particles: Vec::new() }
     }
 
-    pub fn tick(&mut self, time: f32) {
-        let particles_len = self.particles.len();
-        let mut accelerations = vec![Vector::new(0.0, 0.0); particles_len];
-        for i in 0..particles_len {
-            for j in i+1..particles_len {
-                let a = self.particles[i];
-                let b = self.particles[j];
-                let r_sq = Vector::distance_sq(&a.position, &b.position);
-                // Newtons law of universal gravitation: (G * m1 * m2) / r^2
-                let f = (6.67430e-11 * a.mass * b.mass / r_sq) * time;
-                if f.is_infinite() {
-                    continue
-                } else {
-                    let (x1, y1) = a.position.to_cartesian();
-                    let (x2, y2) = b.position.to_cartesian();
-                    let d1 = f32::atan2(y2 - y1, x2 - x1);
-                    let d2 = d1 + PI;
-                    // f = ma
-                    accelerations[i] += Vector::new(d1, f / a.mass);
-                    accelerations[j] += Vector::new(d2, f / b.mass);
+    pub fn tick(&mut self, time: f32, steps: NonZeroU16) {
+        let stepped_time = time / steps.get() as f32;
+        for _ in 0..steps.get() {
+            let particles_len = self.particles.len();
+            let mut accelerations = vec![Vector::new(0.0, 0.0); particles_len];
+            for i in 0..particles_len {
+                for j in i + 1..particles_len {
+                    let a = self.particles[i];
+                    let b = self.particles[j];
+                    let r_sq = Vector::distance_sq(&a.position, &b.position);
+                    // Newtons law of universal gravitation: (G * m1 * m2) / r^2
+                    let f = (6.67430e-11 * a.mass * b.mass / r_sq) * stepped_time;
+                    if f.is_infinite() {
+                        continue
+                    } else {
+                        let (x1, y1) = a.position.to_cartesian();
+                        let (x2, y2) = b.position.to_cartesian();
+                        let d1 = f32::atan2(y2 - y1, x2 - x1);
+                        let d2 = d1 + PI;
+                        // f = ma
+                        accelerations[i] += Vector::new(d1, f / a.mass);
+                        accelerations[j] += Vector::new(d2, f / b.mass);
+                    }
                 }
             }
-        }
-        for (i, particle) in self.particles.iter_mut().enumerate() {
-            particle.velocity.step(&accelerations[i], time);
-            particle.position.step(&particle.velocity, time);
+            for (i, particle) in self.particles.iter_mut().enumerate() {
+                particle.velocity.step(&accelerations[i], stepped_time);
+                particle.position.step(&particle.velocity, stepped_time);
+            }
         }
     }
 
@@ -63,18 +67,21 @@ impl World {
         mass_points
     }
 
-    pub fn par_tick(&mut self, time: f32) {
-        let particles = Arc::new(self.particles.clone());
-        let accelerations = Self::tick_split(particles, 0, self.particles.len(), time);
-        self.particles.par_iter_mut()
-            .zip(accelerations)
-            .for_each(|(particle, acceleration)| {
-                particle.velocity.step(&acceleration, time);
-                particle.position.step(&particle.velocity, time);
-            });
+    pub fn par_tick(&mut self, time: f32, steps: NonZeroU16) {
+        let stepped_time = time / steps.get() as f32;
+        for _ in 0..steps.get() {
+            let particles = Arc::new(self.particles.clone());
+            let accelerations = Self::tick_split(particles, 0, self.particles.len(), stepped_time);
+            self.particles.par_iter_mut()
+                .zip(accelerations)
+                .for_each(|(particle, acceleration)| {
+                    particle.velocity.step(&acceleration, stepped_time);
+                    particle.position.step(&particle.velocity, stepped_time);
+                });
+        }
     }
 
-    fn tick_split(particles: Arc<Vec<Particle>>, lo: usize, hi: usize, time: f32) -> Vec<Vector> {
+    fn tick_split(particles: Arc<Vec<Particle>>, lo: usize, hi: usize, stepped_time: f32) -> Vec<Vector> {
         let mid = (lo + hi) / 2;
         if mid == lo {
             let mut accelerations = vec![Vector::new(0.0, 0.0); particles.len()];
@@ -84,7 +91,7 @@ impl World {
                 let b = particles[j];
                 let r_sq = Vector::distance_sq(&a.position, &b.position);
                 // Newtons law of universal gravitation: (G * m1 * m2) / r^2
-                let f = (6.67430e-11 * a.mass * b.mass / r_sq) * time;
+                let f = (6.67430e-11 * a.mass * b.mass / r_sq) * stepped_time;
                 if f.is_infinite() {
                     continue
                 } else {
@@ -101,8 +108,8 @@ impl World {
         } else {
             let particles_lo = particles.clone();
             let (lo, hi) = rayon::join(
-                || Self::tick_split(particles_lo, lo, mid, time),
-                || Self::tick_split(particles, mid, hi, time)
+                || Self::tick_split(particles_lo, lo, mid, stepped_time),
+                || Self::tick_split(particles, mid, hi, stepped_time)
             );
             lo.into_iter()
                 .zip(hi)
@@ -171,74 +178,77 @@ impl GPUWorld {
         }
     }
 
-    pub fn tick(&self, time: f32) {
-        let layout = self.force_direction_pipeline.layout().set_layouts().first().unwrap();
-        let particle_length = self.particles.read().unwrap().len();
-        let force_direction_buffer_length = particle_length * (particle_length - 1) / 2;
-        let (time_buffer, time_buffer_future) = ImmutableBuffer::from_data(time, BufferUsage::all(), self.queue.clone())
-            .expect("unable to create time buffer");
-        let force_direction_buffer: Arc<DeviceLocalBuffer<[Vector]>> = DeviceLocalBuffer::array(self.device.clone(), force_direction_buffer_length as DeviceSize, BufferUsage::all(), self.device.active_queue_families())
-            .expect("unable to create force direction buffer");
-        let set = PersistentDescriptorSet::new(
-            layout.clone(),
-            [
-                WriteDescriptorSet::buffer(0, self.particles.clone()),
-                WriteDescriptorSet::buffer(1, time_buffer),
-                WriteDescriptorSet::buffer(2, force_direction_buffer.clone())
-            ]
-        ).unwrap();
-        let force_direction_command_buffer = {
-            let mut builder = AutoCommandBufferBuilder::primary(
-                self.device.clone(),
-                self.queue.family(),
-                CommandBufferUsage::OneTimeSubmit
+    pub fn tick(&mut self, time: f32, steps: NonZeroU16) {
+        let stepped_time = time / steps.get() as f32;
+        for _ in 0..steps.get() {
+            let layout = self.force_direction_pipeline.layout().set_layouts().first().unwrap();
+            let particle_length = self.particles.read().unwrap().len();
+            let force_direction_buffer_length = particle_length * (particle_length - 1) / 2;
+            let (time_buffer, time_buffer_future) = ImmutableBuffer::from_data(stepped_time, BufferUsage::all(), self.queue.clone())
+                .expect("unable to create time buffer");
+            let force_direction_buffer: Arc<DeviceLocalBuffer<[Vector]>> = DeviceLocalBuffer::array(self.device.clone(), force_direction_buffer_length as DeviceSize, BufferUsage::all(), self.device.active_queue_families())
+                .expect("unable to create force direction buffer");
+            let set = PersistentDescriptorSet::new(
+                layout.clone(),
+                [
+                    WriteDescriptorSet::buffer(0, self.particles.clone()),
+                    WriteDescriptorSet::buffer(1, time_buffer),
+                    WriteDescriptorSet::buffer(2, force_direction_buffer.clone())
+                ]
             ).unwrap();
-            builder
-                .bind_pipeline_compute(self.force_direction_pipeline.clone())
-                .bind_descriptor_sets(
-                    PipelineBindPoint::Compute,
-                    self.force_direction_pipeline.layout().clone(),
-                    0,
-                    set.clone()
-                )
-                .dispatch([(force_direction_buffer_length / 64 + 1) as u32, 1, 1])
-                .unwrap();
-            builder.build().unwrap()
-        };
+            let force_direction_command_buffer = {
+                let mut builder = AutoCommandBufferBuilder::primary(
+                    self.device.clone(),
+                    self.queue.family(),
+                    CommandBufferUsage::OneTimeSubmit
+                ).unwrap();
+                builder
+                    .bind_pipeline_compute(self.force_direction_pipeline.clone())
+                    .bind_descriptor_sets(
+                        PipelineBindPoint::Compute,
+                        self.force_direction_pipeline.layout().clone(),
+                        0,
+                        set.clone()
+                    )
+                    .dispatch([(force_direction_buffer_length / 64 + 1) as u32, 1, 1])
+                    .unwrap();
+                builder.build().unwrap()
+            };
 
-        let acceleration_command_buffer = {
-            let mut builder = AutoCommandBufferBuilder::primary(
-                self.device.clone(),
-                self.queue.family(),
-                CommandBufferUsage::OneTimeSubmit
-            ).unwrap();
-            builder
-                .bind_pipeline_compute(self.acceleration_pipeline.clone())
-                .bind_descriptor_sets(
-                    PipelineBindPoint::Compute,
-                    self.acceleration_pipeline.layout().clone(),
-                    0,
-                    set.clone()
-                )
-                .dispatch([(particle_length / 64 + 1) as u32, 1, 1])
-                .unwrap();
-            builder.build().unwrap()
-        };
+            let acceleration_command_buffer = {
+                let mut builder = AutoCommandBufferBuilder::primary(
+                    self.device.clone(),
+                    self.queue.family(),
+                    CommandBufferUsage::OneTimeSubmit
+                ).unwrap();
+                builder
+                    .bind_pipeline_compute(self.acceleration_pipeline.clone())
+                    .bind_descriptor_sets(
+                        PipelineBindPoint::Compute,
+                        self.acceleration_pipeline.layout().clone(),
+                        0,
+                        set.clone()
+                    )
+                    .dispatch([(particle_length / 64 + 1) as u32, 1, 1])
+                    .unwrap();
+                builder.build().unwrap()
+            };
 
-        time_buffer_future
-            .then_signal_fence_and_flush()
-            .unwrap()
-            .then_execute(self.queue.clone(), force_direction_command_buffer)
-            .unwrap()
-            // I do not know if this is required
-            .then_signal_semaphore_and_flush()
-            .unwrap()
-            .then_execute_same_queue(acceleration_command_buffer)
-            .unwrap()
-            .then_signal_fence_and_flush()
-            .unwrap()
-            .wait(None)
-            .unwrap();
+            time_buffer_future
+                .then_signal_fence_and_flush()
+                .unwrap()
+                .then_execute(self.queue.clone(), force_direction_command_buffer)
+                .unwrap()
+                // I do not know if this is required
+                .then_signal_semaphore_and_flush()
+                .unwrap()
+                .then_execute_same_queue(acceleration_command_buffer)
+                .unwrap()
+                .then_signal_fence_and_flush()
+                .unwrap()
+                .wait(None)
+                .unwrap();
+        }
     }
 
     pub fn get_mass_points(&self) -> Vec<MassPoint> {

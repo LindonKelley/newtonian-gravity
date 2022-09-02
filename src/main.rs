@@ -1,6 +1,6 @@
 use std::f32::consts::{FRAC_PI_2, PI, TAU};
 use std::fs::File;
-use std::num::NonZeroUsize;
+use std::num::{NonZeroU16, NonZeroUsize};
 use std::ops::Range;
 use std::thread;
 use std::thread::available_parallelism;
@@ -27,9 +27,11 @@ const SEED: u64 = 23;
 const PARTICLE_COUNT: usize = 100;
 const FRAME_COUNT: usize = 240;
 const SCALE: f32 = 500.0;
-const TIME_SCALE: f32 = 20.0;
-// maybe switch over to quality steps
-const TIME_STEP: f32 = 1.0;
+const TIME: f32 = 20.0;
+const TIME_STEPS: NonZeroU16 = match NonZeroU16::new(20) {
+    None => panic!("TIME_STEPS may not be 0"),
+    Some(steps) => steps
+};
 const SIZE: Option<(f32, f32)> = Some((1000.0, 1000.0));
 const PARTICLE_GENERATOR: fn() -> Vec<Particle> = generate_particles;
 
@@ -42,7 +44,7 @@ fn main() {
 #[allow(dead_code)]
 fn output_gpu() {
     let world = GPUWorld::new(PARTICLE_GENERATOR());
-    tick_and_output_gif(world, |world, t| world.tick(t), GPUWorld::get_mass_points, "gpu");
+    tick_and_output_gif(world, GPUWorld::tick, GPUWorld::get_mass_points, "gpu");
 }
 
 #[allow(dead_code)]
@@ -73,7 +75,7 @@ fn compare_outputs() {
     }),
     thread::spawn(|| {
         let world = GPUWorld::new(particles_c);
-        tick_and_output_gif(world, |world, t| world.tick(t), GPUWorld::get_mass_points, "gpu");
+        tick_and_output_gif(world, GPUWorld::tick, GPUWorld::get_mass_points, "gpu");
     })
     ];
     for handle in handles {
@@ -146,17 +148,12 @@ fn generate_3_body() -> Vec<Particle> {
     particles
 }
 
-fn tick_and_output_gif<T, TF: FnMut(&mut T, f32), MPG: FnMut(&T) -> Vec<MassPoint>>(mut world: T, mut tick_function: TF, mut mass_point_getter: MPG, name: &str) {
+fn tick_and_output_gif<W, TF: FnMut(&mut W, f32, NonZeroU16), MPG: FnMut(&W) -> Vec<MassPoint>>(mut world: W, mut tick_function: TF, mut mass_point_getter: MPG, name: &str) {
     let mut periodic_logger = PeriodicLogger::new(&format!("simulating {}", name), Level::Info);
-    let mut time_scale_render = 0.0;
     let mut mass_position_frames = Vec::with_capacity(FRAME_COUNT);
     for frame in 0..FRAME_COUNT {
-        while time_scale_render < TIME_SCALE {
-            tick_function(&mut world, TIME_STEP);
-            time_scale_render += TIME_STEP;
-        }
+        tick_function(&mut world, TIME, TIME_STEPS);
         mass_position_frames.push(mass_point_getter(&world));
-        time_scale_render -= TIME_SCALE;
         periodic_logger.log(format!("{} / {}", frame, FRAME_COUNT));
     }
     output_gif(mass_position_frames, name);
