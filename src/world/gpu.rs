@@ -6,7 +6,7 @@ use vulkano::instance::{Instance, InstanceCreateInfo};
 use vulkano::device::physical::PhysicalDevice;
 use vulkano::shader::ShaderModule;
 use std::num::NonZeroU16;
-use vulkano::DeviceSize;
+use vulkano::{DeviceSize, sync};
 use vulkano::descriptor_set::{PersistentDescriptorSet, WriteDescriptorSet};
 use vulkano::command_buffer::{AutoCommandBufferBuilder, CommandBufferUsage};
 use vulkano::sync::GpuFuture;
@@ -71,74 +71,66 @@ impl GPUWorld {
 
     pub fn tick(&mut self, time: f32, steps: NonZeroU16) {
         let stepped_time = time / steps.get() as f32;
-        for _ in 0..steps.get() {
-            let layout = self.force_direction_pipeline.layout().set_layouts().first().unwrap();
-            let particle_length = self.particles.read().unwrap().len();
-            let force_direction_buffer_length = particle_length * (particle_length - 1) / 2;
-            let (time_buffer, time_buffer_future) = ImmutableBuffer::from_data(stepped_time, BufferUsage::all(), self.queue.clone())
-                .expect("unable to create time buffer");
-            let force_direction_buffer: Arc<DeviceLocalBuffer<[Vector]>> = DeviceLocalBuffer::array(self.device.clone(), force_direction_buffer_length as DeviceSize, BufferUsage::all(), self.device.active_queue_families())
-                .expect("unable to create force direction buffer");
-            let set = PersistentDescriptorSet::new(
-                layout.clone(),
-                [
-                    WriteDescriptorSet::buffer(0, self.particles.clone()),
-                    WriteDescriptorSet::buffer(1, time_buffer),
-                    WriteDescriptorSet::buffer(2, force_direction_buffer.clone())
-                ]
+        let layout = self.force_direction_pipeline.layout().set_layouts().first().unwrap();
+        let particle_length = self.particles.read().unwrap().len();
+        let force_direction_buffer_length = particle_length * (particle_length - 1) / 2;
+        let (time_buffer, time_buffer_future) = ImmutableBuffer::from_data(stepped_time, BufferUsage::all(), self.queue.clone()).unwrap();
+        let force_direction_buffer: Arc<DeviceLocalBuffer<[Vector]>> = DeviceLocalBuffer::array(self.device.clone(), force_direction_buffer_length as DeviceSize, BufferUsage::all(), self.device.active_queue_families()).unwrap();
+        let set = PersistentDescriptorSet::new(
+            layout.clone(),
+            [
+                WriteDescriptorSet::buffer(0, self.particles.clone()),
+                WriteDescriptorSet::buffer(1, time_buffer.clone()),
+                WriteDescriptorSet::buffer(2, force_direction_buffer.clone())
+            ]
+        ).unwrap();
+        time_buffer_future
+            .then_signal_fence_and_flush().unwrap()
+            .wait(None).unwrap();
+        let force_direction_command_buffer = {
+            let mut builder = AutoCommandBufferBuilder::primary(
+                self.device.clone(),
+                self.queue.family(),
+                CommandBufferUsage::MultipleSubmit
             ).unwrap();
-            let force_direction_command_buffer = {
-                let mut builder = AutoCommandBufferBuilder::primary(
-                    self.device.clone(),
-                    self.queue.family(),
-                    CommandBufferUsage::OneTimeSubmit
-                ).unwrap();
-                builder
-                    .bind_pipeline_compute(self.force_direction_pipeline.clone())
-                    .bind_descriptor_sets(
-                        PipelineBindPoint::Compute,
-                        self.force_direction_pipeline.layout().clone(),
-                        0,
-                        set.clone()
-                    )
-                    .dispatch([(force_direction_buffer_length / 64 + 1) as u32, 1, 1])
-                    .unwrap();
-                builder.build().unwrap()
-            };
-
-            let acceleration_command_buffer = {
-                let mut builder = AutoCommandBufferBuilder::primary(
-                    self.device.clone(),
-                    self.queue.family(),
-                    CommandBufferUsage::OneTimeSubmit
-                ).unwrap();
-                builder
-                    .bind_pipeline_compute(self.acceleration_pipeline.clone())
-                    .bind_descriptor_sets(
-                        PipelineBindPoint::Compute,
-                        self.acceleration_pipeline.layout().clone(),
-                        0,
-                        set.clone()
-                    )
-                    .dispatch([(particle_length / 64 + 1) as u32, 1, 1])
-                    .unwrap();
-                builder.build().unwrap()
-            };
-
-            time_buffer_future
-                .then_signal_fence_and_flush()
-                .unwrap()
-                .then_execute(self.queue.clone(), force_direction_command_buffer)
-                .unwrap()
-                // I do not know if this is required
-                .then_signal_semaphore_and_flush()
-                .unwrap()
-                .then_execute_same_queue(acceleration_command_buffer)
-                .unwrap()
-                .then_signal_fence_and_flush()
-                .unwrap()
-                .wait(None)
+            builder
+                .bind_pipeline_compute(self.force_direction_pipeline.clone())
+                .bind_descriptor_sets(
+                    PipelineBindPoint::Compute,
+                    self.force_direction_pipeline.layout().clone(),
+                    0,
+                    set.clone()
+                )
+                .dispatch([(force_direction_buffer_length / 64 + 1) as u32, 1, 1])
                 .unwrap();
+            Arc::new(builder.build().unwrap())
+        };
+
+        let acceleration_command_buffer = {
+            let mut builder = AutoCommandBufferBuilder::primary(
+                self.device.clone(),
+                self.queue.family(),
+                CommandBufferUsage::MultipleSubmit
+            ).unwrap();
+            builder
+                .bind_pipeline_compute(self.acceleration_pipeline.clone())
+                .bind_descriptor_sets(
+                    PipelineBindPoint::Compute,
+                    self.acceleration_pipeline.layout().clone(),
+                    0,
+                    set.clone()
+                )
+                .dispatch([(particle_length / 64 + 1) as u32, 1, 1])
+                .unwrap();
+            Arc::new(builder.build().unwrap())
+        };
+        for _ in 0..steps.get() {
+            sync::now(self.device.clone())
+                .then_execute(self.queue.clone(), force_direction_command_buffer.clone()).unwrap()
+                .then_signal_semaphore_and_flush().unwrap()
+                .then_execute_same_queue(acceleration_command_buffer.clone()).unwrap()
+                .then_signal_fence_and_flush().unwrap()
+                .wait(None).unwrap();
         }
     }
 
