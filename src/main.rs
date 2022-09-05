@@ -15,19 +15,22 @@ use log4rs::encode::pattern::PatternEncoder;
 use log4rs::Config;
 use rand_pcg::Pcg64Mcg;
 use rayon::ThreadPoolBuilder;
+use world::cpu::CPUWorld;
+use world::gpu::GPUWorld;
 use crate::periodic_logger::PeriodicLogger;
 use crate::vector::Vector;
-use crate::world::{GPUWorld, MassPoint, Particle, World};
+use crate::world::{MassPoint, Particle};
+use crate::world::par::ParWorld;
 
 mod vector;
-mod world;
 mod periodic_logger;
+mod world;
 
 const SEED: u64 = 23;
 const PARTICLE_COUNT: usize = 100;
 const FRAME_COUNT: usize = 240;
 const SCALE: f32 = 500.0;
-const TIME: f32 = 20.0;
+const TIME_PER_FRAME: f32 = 20.0;
 const TIME_STEPS: NonZeroU16 = match NonZeroU16::new(20) {
     None => panic!("TIME_STEPS may not be 0"),
     Some(steps) => steps
@@ -66,12 +69,12 @@ fn compare_outputs() {
     .unwrap();
     let handles = [
     thread::spawn(|| {
-        let world = World { particles: particles_a };
-        tick_and_output_gif(world, World::tick, World::get_mass_points, "single");
+        let world = CPUWorld { particles: particles_a };
+        tick_and_output_gif(world, CPUWorld::tick, CPUWorld::get_mass_points, "cpu");
     }),
     thread::spawn(|| {
-        let world = World { particles: particles_b };
-        tick_and_output_gif(world, World::par_tick, World::get_mass_points, "multi");
+        let world = ParWorld::new(particles_b);
+        tick_and_output_gif(world, ParWorld::tick, ParWorld::get_mass_points, "par");
     }),
     thread::spawn(|| {
         let world = GPUWorld::new(particles_c);
@@ -83,8 +86,8 @@ fn compare_outputs() {
     }
 
     {
-        let single = GifDecoder::new(File::open("output/single.gif").unwrap()).unwrap();
-        let multi = GifDecoder::new(File::open("output/multi.gif").unwrap()).unwrap();
+        let single = GifDecoder::new(File::open("output/cpu.gif").unwrap()).unwrap();
+        let multi = GifDecoder::new(File::open("output/par.gif").unwrap()).unwrap();
         let gpu = GifDecoder::new(File::open("output/gpu.gif").unwrap()).unwrap();
         let mut merged = GifEncoder::new(File::create("output/merged.gif").unwrap());
         merged.set_repeat(Repeat::Infinite).unwrap();
@@ -152,7 +155,7 @@ fn tick_and_output_gif<W, TF: FnMut(&mut W, f32, NonZeroU16), MPG: FnMut(&W) -> 
     let mut periodic_logger = PeriodicLogger::new(&format!("simulating {}", name), Level::Info);
     let mut mass_position_frames = Vec::with_capacity(FRAME_COUNT);
     for frame in 0..FRAME_COUNT {
-        tick_function(&mut world, TIME, TIME_STEPS);
+        tick_function(&mut world, TIME_PER_FRAME, TIME_STEPS);
         mass_position_frames.push(mass_point_getter(&world));
         periodic_logger.log(format!("{} / {}", frame, FRAME_COUNT));
     }
