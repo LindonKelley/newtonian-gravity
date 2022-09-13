@@ -1,7 +1,5 @@
 use std::num::NonZeroU16;
 use std::f32::consts::PI;
-use std::sync::Arc;
-use rayon::iter::{IndexedParallelIterator, IntoParallelRefMutIterator, ParallelIterator};
 use crate::{MassPoint, Particle, Vector};
 
 pub struct CPUWorld {

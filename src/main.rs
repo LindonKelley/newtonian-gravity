@@ -2,10 +2,13 @@ use std::f32::consts::{FRAC_PI_2, PI, TAU};
 use std::fs::File;
 use std::num::{NonZeroU16, NonZeroUsize};
 use std::ops::Range;
-use std::thread;
+use std::{fs, thread};
+use std::cmp::Ordering;
 use std::thread::available_parallelism;
+use std::time::Instant;
 use image::codecs::gif::{GifDecoder, GifEncoder, Repeat};
-use image::{AnimationDecoder, Frame, RgbaImage};
+use image::{AnimationDecoder, DynamicImage, Frame, GenericImage, ImageBuffer, open, Pixel, Rgb, RgbaImage, RgbImage};
+use image::io::Reader;
 use imageproc::drawing::draw_filled_circle_mut;
 use rand::{Rng, SeedableRng};
 use log::{Level, LevelFilter};
@@ -13,11 +16,13 @@ use log4rs::append::console::ConsoleAppender;
 use log4rs::config::{Appender, Logger, Root};
 use log4rs::encode::pattern::PatternEncoder;
 use log4rs::Config;
+use num_traits::ToPrimitive;
 use rand_pcg::Pcg64Mcg;
 use rayon::ThreadPoolBuilder;
 use world::cpu::CPUWorld;
 use world::gpu::GPUWorld;
 use crate::periodic_logger::PeriodicLogger;
+use crate::render::cpu::{FastIntegerRasterizer, HorizontalLineImage, Rasterizer};
 use crate::vector::Vector;
 use crate::world::{MassPoint, Particle};
 use crate::world::par::ParWorld;
@@ -25,6 +30,7 @@ use crate::world::par::ParWorld;
 mod vector;
 mod periodic_logger;
 mod world;
+mod render;
 
 const SEED: u64 = 23;
 const PARTICLE_COUNT: usize = 100;
@@ -40,8 +46,237 @@ const PARTICLE_GENERATOR: fn() -> Vec<Particle> = generate_particles;
 
 fn main() {
     initialize_logging();
+    for i in 0..10 {
+        const SCALE: u32 = 1;
+        let start = Instant::now();
+        //let mut image: HorizontalLineImage<_, _> = RgbImage::new(100 * SCALE, 100 * SCALE).into();
+        let mut image = RgbImage::new(100 * SCALE, 100 * SCALE);
+        let circles = [
+            (50.0, 50.0, 25.0),
+            (11.0, 11.0, 10.0),
+            (11.0, 33.0, 10.5),
+            (2.0, 46.0, 1.0),
+            (5.0, 46.0, 0.5),
+            (8.5, 46.5, 1.0),
+            (11.5, 46.5, 0.5),
+            (14.5, 46.5, 0.7),
+            (17.5, 46.5, 0.3),
+            (14.0, 86.3, 13.0),
+            (86.5, 86.5, 13.0)
+        ];
+        const SUB_DIV: usize = 3;
+        for (cx, cy, r) in circles {
+            // FastIntegerRasterizer::draw_filled_circle(&mut image, cx * SCALE as f32, cy * SCALE as f32, r * SCALE as f32, [255, 255, 255].into());
+            approximate_area_intersection_draw_circle::<SUB_DIV, _>(|x, y, f| {
+                let c = (f * 255.0) as u8;
+                unsafe {
+                    image.unsafe_put_pixel(x, y, [c; 3].into())
+                }
+            }, cx * SCALE as f32, cy * SCALE as f32, r * SCALE as f32);
 
-    compare_outputs();
+            /*
+            area_intersection_draw_circle(|x, y, f| {
+                let c = (f * 255.0) as u8;
+                unsafe {
+                    image.unsafe_put_pixel(x, y, [c; 3].into())
+                }
+            }, cx * SCALE as f32, cy * SCALE as f32, r * SCALE as f32);
+             */
+        }
+        println!("{:02.3}", start.elapsed().as_secs_f32());
+        if i == 9 {
+            image.save(format!("output/sub_div_{:02}_circle.png", SUB_DIV)).unwrap();
+        }
+    }
+    let mut i = 1;
+    let image_a = if let DynamicImage::ImageRgb8(image) =
+        Reader::open("output/inter_circle.png").unwrap().decode().unwrap()
+            { image } else { panic!() };
+    while i <= 1024 {
+        let image_b = if let DynamicImage::ImageRgb8(image) =
+            Reader::open(format!("output/sub_div_{:02}_circle.png", i)).unwrap().decode().unwrap()
+                { image } else { panic!() };
+        let mut image_diff = RgbImage::new(image_a.width(), image_a.height());
+        let mut diff = 0;
+        for ((a, b), c) in image_a.pixels().zip(image_b.pixels()).zip(image_diff.pixels_mut()) {
+            let a = a.0[0];
+            let b = b.0[0];
+            match a.cmp(&b) {
+                Ordering::Less => {
+                    c.0 = [b - a, b - a, 0];
+                    diff += (b - a) as u32;
+                }
+                Ordering::Equal => {}
+                Ordering::Greater => {
+                    c.0 = [0, 0, a - b];
+                    diff += (a - b) as u32;
+                }
+            }
+        }
+        println!("{}", diff);
+        image_diff.save(format!("output/image_diff_{:02}.png", i)).unwrap();
+        i *= 2;
+    }
+}
+
+fn approximate_area_intersection_draw_circle<const SUB_DIV: usize, F: FnMut(u32, u32, f32)>(mut put_pixel: F, cx: f32, cy: f32, r: f32) {
+    let min_x = (cx - r) as u32;
+    let max_x = (cx + r + 1.0) as u32;
+    let min_y = (cy - r) as u32;
+    let max_y = (cy + r + 1.0) as u32;
+    let max_inside_count = (SUB_DIV * SUB_DIV) as f32;
+    let r_sq = r * r;
+    for y in min_y..max_y {
+        let ys = sub_divisions::<SUB_DIV>(y);
+        let mut y_diffs_sq = ys;
+        for y in y_diffs_sq.iter_mut() {
+            *y -= cy;
+            *y *= *y;
+        }
+        for x in min_x..max_x {
+            let xs = sub_divisions::<SUB_DIV>(x);
+            let mut inside_count = 0u32;
+            for y_i in 0..SUB_DIV {
+                for x in xs {
+                    let x_diff = cx - x;
+                    let distance_sq = x_diff * x_diff + y_diffs_sq[y_i];
+                    if distance_sq <= r_sq {
+                        inside_count += 1;
+                    }
+                }
+            }
+            let c = inside_count as f32 / max_inside_count;
+            put_pixel(x, y, c);
+        }
+    }
+}
+
+#[inline(always)]
+fn sub_divisions<const SUB_DIV: usize>(v: u32) -> [f32; SUB_DIV] {
+    let mut vs = [0.0; SUB_DIV];
+    if SUB_DIV > 0 {
+        let diff = 1.0 / (SUB_DIV + 1) as f32;
+        vs[0] = v as f32 + diff;
+        for i in 1..SUB_DIV {
+            vs[i] = vs[i-1] + diff;
+        }
+    }
+    vs
+}
+
+fn area_intersection_draw_circle<F: FnMut(u32, u32, f32)>(mut put_pixel: F, cx: f32, cy: f32, r: f32) {
+    // implicit saturating casting behavior is actually desirable here
+    let min_x = (cx - r) as u32;
+    let max_x = (cx + r + 1.0) as u32;
+    let min_y = (cy - r) as u32;
+    let max_y = (cy + r + 1.0) as u32;
+
+    for y in min_y..max_y {
+        let y0 = y as f32;
+        let y1 = y0 + 1.0;
+        for x in min_x..max_x {
+            let x0 = x as f32;
+            let x1 = x0 + 1.0;
+            let c = area(x0, y0, x1, y1, cx, cy, r);
+            // todo c actually can slightly exceed 1.0
+            put_pixel(x, y, c);
+        }
+    }
+}
+
+fn area(x0: f32, y0: f32, x1: f32, y1: f32, cx: f32, cy: f32, r: f32) -> f32 {
+    area_rectangle(x0 - cx, y0 - cy, x1 - cx, y1 - cy, r)
+}
+
+/// the following must hold true for correct results
+/// x0 <= x1
+/// y0 <= y1
+/// r >= 0.0
+fn area_rectangle(x0: f32, y0: f32, x1: f32, y1: f32, r: f32) -> f32 {
+    debug_assert!(x0 <= x1);
+    debug_assert!(y0 <= y1);
+    debug_assert!(r >= 0.0);
+    if y0 < 0.0 {
+        if y1 < 0.0 {
+            area_rectangle(x0, -y1, x1, -y0, r)
+        } else {
+            area_rectangle(x0, 0.0, x1, -y0, r) + area_rectangle(x0, 0.0, x1, y1, r)
+        }
+    } else {
+        area_tall_rectangle(x0, x1, y0, r) - area_tall_rectangle(x0, x1, y1, r)
+    }
+}
+
+/// Intersectional area of an infinitely tall rectangle and a circle
+///
+/// The rectangle's left edge is at `x0`, right adge is at `x1`, bottom edge is at `h`, and top edge is at `f32::inf`
+///
+/// The circle is centered at (0.0, 0.0) with a radius of `r`
+fn area_tall_rectangle(x0: f32, x1: f32, h: f32, r: f32) -> f32 {
+    let s = if h < r {
+        f32::sqrt(r * r - h * h)
+    } else {
+        0.0
+    };
+    g(clamp(x1, -s, s), h, r) - g(clamp(x0, -s, s), h, r)
+}
+
+#[inline(always)]
+fn clamp(v: f32, min: f32, max: f32) -> f32 {
+    debug_assert!(min <= max);
+    f32::max(min, f32::min(v, max))
+}
+
+/// Indefinite integral of a circle segment
+#[inline(always)]
+fn g(x: f32, h: f32, r: f32) -> f32 {
+    (f32::sqrt(1.0 - x * x / (r * r)) * x * r + r * r * f32::asin(x / r) - 2.0 * h * x) / 2.0
+}
+
+fn draw_circle<F: FnMut(u32, u32, f32)>(mut put_pixel: F, cx: f32, cy: f32, r: f32) {
+    let mut y = 0.0;
+    let mut x = r;
+    let mut d = 0.0;
+    mirror_put_pixel(&mut put_pixel, cx, cy, x, y, 1.0);
+    while x > y {
+        y += 1.0;
+        let dtc = distance_to_ceil(r, y);
+        if dtc < d {
+            x -= 1.0;
+        }
+        d = dtc;
+        mirror_put_pixel(&mut put_pixel, cx, cy, x, y, 1.0 - d);
+        mirror_put_pixel(&mut put_pixel, cx, cy, x - 1.0, y, d);
+    }
+}
+
+#[inline(always)]
+fn mirror_put_pixel<F: FnMut(u32, u32, f32)>(put_pixel: &mut F, c_x: f32, c_y: f32, x: f32, y: f32, c: f32) {
+    let min_x = (c_x - x).to_u32();
+    let max_x = (c_x + x).to_u32();
+    let min_y = (c_y - y).to_u32();
+    let max_y = (c_y + y).to_u32();
+    mirror_put_pixel_if_some(put_pixel, min_x, min_y, c);
+    mirror_put_pixel_if_some(put_pixel, max_x, min_y, c);
+    mirror_put_pixel_if_some(put_pixel, min_x, max_y, c);
+    mirror_put_pixel_if_some(put_pixel, max_x, max_y, c);
+}
+
+#[inline(always)]
+fn mirror_put_pixel_if_some<F: FnMut(u32, u32, f32)>(put_pixel: &mut F, x: Option<u32>, y: Option<u32>, c: f32) {
+    match (x, y) {
+        (Some(x), Some(y)) => {
+            put_pixel(x, y, c);
+            put_pixel(y, x, c);
+        },
+        _ => {}
+    }
+}
+
+#[inline(always)]
+fn distance_to_ceil(r: f32, y: f32) -> f32 {
+    let x = f32::sqrt(r * r - y * y);
+    f32::ceil(x) - x
 }
 
 #[allow(dead_code)]
@@ -58,28 +293,28 @@ fn compare_outputs() {
     let particles_c = particles;
 
     ThreadPoolBuilder::new()
-    .num_threads(
-    usize::max(
-    available_parallelism()
-    .unwrap_or(NonZeroUsize::new(1).unwrap())
-    .get() - 1,
-    1)
-    )
-    .build_global()
-    .unwrap();
+        .num_threads(
+            usize::max(
+                available_parallelism()
+                    .unwrap_or(NonZeroUsize::new(1).unwrap())
+                    .get() - 1,
+                1)
+        )
+        .build_global()
+        .unwrap();
     let handles = [
-    thread::spawn(|| {
-        let world = CPUWorld { particles: particles_a };
-        tick_and_output_gif(world, CPUWorld::tick, CPUWorld::get_mass_points, "cpu");
-    }),
-    thread::spawn(|| {
-        let world = ParWorld::new(particles_b);
-        tick_and_output_gif(world, ParWorld::tick, ParWorld::get_mass_points, "par");
-    }),
-    thread::spawn(|| {
-        let world = GPUWorld::new(particles_c);
-        tick_and_output_gif(world, GPUWorld::tick, GPUWorld::get_mass_points, "gpu");
-    })
+        thread::spawn(|| {
+            let world = CPUWorld { particles: particles_a };
+            tick_and_output_gif(world, CPUWorld::tick, CPUWorld::get_mass_points, "cpu");
+        }),
+        thread::spawn(|| {
+            let world = ParWorld::new(particles_b);
+            tick_and_output_gif(world, ParWorld::tick, ParWorld::get_mass_points, "par");
+        }),
+        thread::spawn(|| {
+            let world = GPUWorld::new(particles_c);
+            tick_and_output_gif(world, GPUWorld::tick, GPUWorld::get_mass_points, "gpu");
+        })
     ];
     for handle in handles {
         handle.join().unwrap();
@@ -93,26 +328,26 @@ fn compare_outputs() {
         merged.set_repeat(Repeat::Infinite).unwrap();
         let mut periodic_logger = PeriodicLogger::new("exporting merged", Level::Info);
         single.into_frames()
-        .zip(multi.into_frames())
-        .zip(gpu.into_frames())
-        .map(|((single_frame_result, multi_frame_result), gpu_frame_result)| {
-            (single_frame_result.unwrap().into_buffer(), multi_frame_result.unwrap().into_buffer(), gpu_frame_result.unwrap().into_buffer())
-        })
-        .enumerate()
-        .for_each(|(frame, (single_frame, multi_frame, gpu_frame))| {
-            periodic_logger.log(format!("{} / {}", frame, FRAME_COUNT));
-            let (width, height) = (single_frame.width(), single_frame.height());
-            let mut image = RgbaImage::new(width, height);
-            for y in 0..height {
-                for x in 0..width {
-                    let r = single_frame[(x, y)].0[0];
-                    let g = multi_frame[(x, y)].0[1];
-                    let b = gpu_frame[(x, y)].0[2];
-                    image[(x, y)].0 = [r, g, b, 255];
+            .zip(multi.into_frames())
+            .zip(gpu.into_frames())
+            .map(|((single_frame_result, multi_frame_result), gpu_frame_result)| {
+                (single_frame_result.unwrap().into_buffer(), multi_frame_result.unwrap().into_buffer(), gpu_frame_result.unwrap().into_buffer())
+            })
+            .enumerate()
+            .for_each(|(frame, (single_frame, multi_frame, gpu_frame))| {
+                periodic_logger.log(format!("{} / {}", frame, FRAME_COUNT));
+                let (width, height) = (single_frame.width(), single_frame.height());
+                let mut image = RgbaImage::new(width, height);
+                for y in 0..height {
+                    for x in 0..width {
+                        let r = single_frame[(x, y)].0[0];
+                        let g = multi_frame[(x, y)].0[1];
+                        let b = gpu_frame[(x, y)].0[2];
+                        image[(x, y)].0 = [r, g, b, 255];
+                    }
                 }
-            }
-            merged.encode_frame(Frame::new(image)).unwrap();
-        });
+                merged.encode_frame(Frame::new(image)).unwrap();
+            });
     }
 }
 
