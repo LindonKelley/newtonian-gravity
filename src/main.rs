@@ -4,6 +4,7 @@ use std::num::{NonZeroU16, NonZeroUsize};
 use std::ops::Range;
 use std::{fs, thread};
 use std::cmp::Ordering;
+use std::path::Path;
 use std::thread::available_parallelism;
 use std::time::Instant;
 use image::codecs::gif::{GifDecoder, GifEncoder, Repeat};
@@ -22,7 +23,7 @@ use rayon::ThreadPoolBuilder;
 use world::cpu::CPUWorld;
 use world::gpu::GPUWorld;
 use crate::periodic_logger::PeriodicLogger;
-use crate::render::cpu::{FastIntegerRasterizer, HorizontalLineImage, Rasterizer};
+use crate::render::cpu::{AreaIntersectionRasterizer, FastIntegerRasterizer, GrayscaleRgbScalar, HorizontalLineImage, Rasterizer};
 use crate::vector::Vector;
 use crate::world::{MassPoint, Particle};
 use crate::world::par::ParWorld;
@@ -49,8 +50,8 @@ fn main() {
     for i in 0..10 {
         const SCALE: u32 = 1;
         let start = Instant::now();
-        //let mut image: HorizontalLineImage<_, _> = RgbImage::new(100 * SCALE, 100 * SCALE).into();
-        let mut image = RgbImage::new(100 * SCALE, 100 * SCALE);
+        let mut image: HorizontalLineImage<_, _> = RgbImage::new(100 * SCALE, 100 * SCALE).into();
+        //let mut image = RgbImage::new(100 * SCALE, 100 * SCALE);
         let circles = [
             (50.0, 50.0, 25.0),
             (11.0, 11.0, 10.0),
@@ -66,16 +67,11 @@ fn main() {
         ];
         const SUB_DIV: usize = 3;
         for (cx, cy, r) in circles {
-            // FastIntegerRasterizer::draw_filled_circle(&mut image, cx * SCALE as f32, cy * SCALE as f32, r * SCALE as f32, [255, 255, 255].into());
-            approximate_area_intersection_draw_circle::<SUB_DIV, _>(|x, y, f| {
-                let c = (f * 255.0) as u8;
-                unsafe {
-                    image.unsafe_put_pixel(x, y, [c; 3].into())
-                }
-            }, cx * SCALE as f32, cy * SCALE as f32, r * SCALE as f32);
+            //<FastIntegerRasterizer as Rasterizer<_, _, GrayscaleRgbScalar>>::draw_filled_circle(&mut image, cx * SCALE as f32, cy * SCALE as f32, r * SCALE as f32, [255, 255, 255].into());
+            <AreaIntersectionRasterizer as Rasterizer<_, _, GrayscaleRgbScalar>>::draw_filled_circle(&mut image, cx * SCALE as f32, cy * SCALE as f32, r * SCALE as f32, [255, 255, 255].into());
 
             /*
-            area_intersection_draw_circle(|x, y, f| {
+            approximate_area_intersection_draw_circle::<SUB_DIV, _>(|x, y, f| {
                 let c = (f * 255.0) as u8;
                 unsafe {
                     image.unsafe_put_pixel(x, y, [c; 3].into())
@@ -84,39 +80,42 @@ fn main() {
              */
         }
         println!("{:02.3}", start.elapsed().as_secs_f32());
-        if i == 9 {
-            image.save(format!("output/sub_div_{:02}_circle.png", SUB_DIV)).unwrap();
+        if SCALE == 1 && i == 9 {
+            println!("overriding image");
+            RgbImage::from(image).save(format!("output/circle.png")).unwrap();
         }
     }
-    let mut i = 1;
+}
+
+fn rgb_image_subtract<P: AsRef<Path>>(path_a: P, path_b: P) -> (RgbImage, u64) {
     let image_a = if let DynamicImage::ImageRgb8(image) =
-        Reader::open("output/inter_circle.png").unwrap().decode().unwrap()
+        Reader::open(path_a).unwrap().decode().unwrap()
             { image } else { panic!() };
-    while i <= 1024 {
-        let image_b = if let DynamicImage::ImageRgb8(image) =
-            Reader::open(format!("output/sub_div_{:02}_circle.png", i)).unwrap().decode().unwrap()
-                { image } else { panic!() };
-        let mut image_diff = RgbImage::new(image_a.width(), image_a.height());
-        let mut diff = 0;
-        for ((a, b), c) in image_a.pixels().zip(image_b.pixels()).zip(image_diff.pixels_mut()) {
-            let a = a.0[0];
-            let b = b.0[0];
-            match a.cmp(&b) {
-                Ordering::Less => {
-                    c.0 = [b - a, b - a, 0];
-                    diff += (b - a) as u32;
-                }
-                Ordering::Equal => {}
-                Ordering::Greater => {
-                    c.0 = [0, 0, a - b];
-                    diff += (a - b) as u32;
-                }
+    let image_b = if let DynamicImage::ImageRgb8(image) =
+        Reader::open(path_b).unwrap().decode().unwrap()
+            { image } else { panic!() };
+    assert_eq!(image_a.width(), image_b.width());
+    let width = image_a.width();
+    assert_eq!(image_a.height(), image_b.height());
+    let height = image_a.height();
+    let mut image_diff = RgbImage::new(width, height);
+    let mut diff = 0;
+    for ((a, b), c) in image_a.pixels().zip(image_b.pixels()).zip(image_diff.pixels_mut()) {
+        let a = a.0[0];
+        let b = b.0[0];
+        match a.cmp(&b) {
+            Ordering::Less => {
+                c.0 = [b - a, b - a, 0];
+                diff += (b - a) as u64;
+            }
+            Ordering::Equal => {}
+            Ordering::Greater => {
+                c.0 = [0, 0, a - b];
+                diff += (a - b) as u64;
             }
         }
-        println!("{}", diff);
-        image_diff.save(format!("output/image_diff_{:02}.png", i)).unwrap();
-        i *= 2;
     }
+    (image_diff, diff)
 }
 
 fn approximate_area_intersection_draw_circle<const SUB_DIV: usize, F: FnMut(u32, u32, f32)>(mut put_pixel: F, cx: f32, cy: f32, r: f32) {
@@ -162,75 +161,6 @@ fn sub_divisions<const SUB_DIV: usize>(v: u32) -> [f32; SUB_DIV] {
         }
     }
     vs
-}
-
-fn area_intersection_draw_circle<F: FnMut(u32, u32, f32)>(mut put_pixel: F, cx: f32, cy: f32, r: f32) {
-    // implicit saturating casting behavior is actually desirable here
-    let min_x = (cx - r) as u32;
-    let max_x = (cx + r + 1.0) as u32;
-    let min_y = (cy - r) as u32;
-    let max_y = (cy + r + 1.0) as u32;
-
-    for y in min_y..max_y {
-        let y0 = y as f32;
-        let y1 = y0 + 1.0;
-        for x in min_x..max_x {
-            let x0 = x as f32;
-            let x1 = x0 + 1.0;
-            let c = area(x0, y0, x1, y1, cx, cy, r);
-            // todo c actually can slightly exceed 1.0
-            put_pixel(x, y, c);
-        }
-    }
-}
-
-fn area(x0: f32, y0: f32, x1: f32, y1: f32, cx: f32, cy: f32, r: f32) -> f32 {
-    area_rectangle(x0 - cx, y0 - cy, x1 - cx, y1 - cy, r)
-}
-
-/// the following must hold true for correct results
-/// x0 <= x1
-/// y0 <= y1
-/// r >= 0.0
-fn area_rectangle(x0: f32, y0: f32, x1: f32, y1: f32, r: f32) -> f32 {
-    debug_assert!(x0 <= x1);
-    debug_assert!(y0 <= y1);
-    debug_assert!(r >= 0.0);
-    if y0 < 0.0 {
-        if y1 < 0.0 {
-            area_rectangle(x0, -y1, x1, -y0, r)
-        } else {
-            area_rectangle(x0, 0.0, x1, -y0, r) + area_rectangle(x0, 0.0, x1, y1, r)
-        }
-    } else {
-        area_tall_rectangle(x0, x1, y0, r) - area_tall_rectangle(x0, x1, y1, r)
-    }
-}
-
-/// Intersectional area of an infinitely tall rectangle and a circle
-///
-/// The rectangle's left edge is at `x0`, right adge is at `x1`, bottom edge is at `h`, and top edge is at `f32::inf`
-///
-/// The circle is centered at (0.0, 0.0) with a radius of `r`
-fn area_tall_rectangle(x0: f32, x1: f32, h: f32, r: f32) -> f32 {
-    let s = if h < r {
-        f32::sqrt(r * r - h * h)
-    } else {
-        0.0
-    };
-    g(clamp(x1, -s, s), h, r) - g(clamp(x0, -s, s), h, r)
-}
-
-#[inline(always)]
-fn clamp(v: f32, min: f32, max: f32) -> f32 {
-    debug_assert!(min <= max);
-    f32::max(min, f32::min(v, max))
-}
-
-/// Indefinite integral of a circle segment
-#[inline(always)]
-fn g(x: f32, h: f32, r: f32) -> f32 {
-    (f32::sqrt(1.0 - x * x / (r * r)) * x * r + r * r * f32::asin(x / r) - 2.0 * h * x) / 2.0
 }
 
 fn draw_circle<F: FnMut(u32, u32, f32)>(mut put_pixel: F, cx: f32, cy: f32, r: f32) {
