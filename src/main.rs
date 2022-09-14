@@ -47,24 +47,46 @@ const PARTICLE_GENERATOR: fn() -> Vec<Particle> = generate_particles;
 
 fn main() {
     initialize_logging();
-    for i in 0..10 {
-        const SCALE: u32 = 1;
+    let circles = [
+        (50.0, 50.0, 25.0),
+        (11.0, 11.0, 10.0),
+        (11.0, 33.0, 10.5),
+        (2.0, 46.0, 1.0),
+        (5.0, 46.0, 0.5),
+        (8.5, 46.5, 1.0),
+        (11.5, 46.5, 0.5),
+        (14.5, 46.5, 0.7),
+        (17.5, 46.5, 0.3),
+        (14.0, 86.3, 13.0),
+        (86.5, 86.5, 13.0)
+    ];
+
+    let mut image: HorizontalLineImage<_, _> = RgbImage::new(100, 100).into();
+    //let mut image = RgbImage::new(100 * SCALE, 100 * SCALE);
+    for (cx, cy, r) in circles {
+        //<FastIntegerRasterizer as Rasterizer<_, _, GrayscaleRgbScalar>>::draw_filled_circle(&mut image, cx * SCALE as f32, cy * SCALE as f32, r * SCALE as f32, [255, 255, 255].into());
+        <AreaIntersectionRasterizer as Rasterizer<_, _, GrayscaleRgbScalar>>::draw_filled_circle(&mut image, cx, cy, r, [255, 255, 255].into());
+
+        /*
+        approximate_area_intersection_draw_circle::<SUB_DIV, _>(|x, y, f| {
+            let c = (f * 255.0) as u8;
+            unsafe {
+                image.unsafe_put_pixel(x, y, [c; 3].into())
+            }
+        }, cx * SCALE as f32, cy * SCALE as f32, r * SCALE as f32);
+         */
+    }
+    println!("overriding image");
+    RgbImage::from(image).save("output/circle.png").unwrap();
+    let (image_diff, num_diff) = rgb_image_subtract("output/inter_circle.png", "output/circle.png");
+    image_diff.save("output/difference.png").unwrap();
+    println!("difference: {}", num_diff);
+
+    for _ in 0..10 {
+        const SCALE: u32 = 128;
         let start = Instant::now();
         let mut image: HorizontalLineImage<_, _> = RgbImage::new(100 * SCALE, 100 * SCALE).into();
         //let mut image = RgbImage::new(100 * SCALE, 100 * SCALE);
-        let circles = [
-            (50.0, 50.0, 25.0),
-            (11.0, 11.0, 10.0),
-            (11.0, 33.0, 10.5),
-            (2.0, 46.0, 1.0),
-            (5.0, 46.0, 0.5),
-            (8.5, 46.5, 1.0),
-            (11.5, 46.5, 0.5),
-            (14.5, 46.5, 0.7),
-            (17.5, 46.5, 0.3),
-            (14.0, 86.3, 13.0),
-            (86.5, 86.5, 13.0)
-        ];
         const SUB_DIV: usize = 3;
         for (cx, cy, r) in circles {
             //<FastIntegerRasterizer as Rasterizer<_, _, GrayscaleRgbScalar>>::draw_filled_circle(&mut image, cx * SCALE as f32, cy * SCALE as f32, r * SCALE as f32, [255, 255, 255].into());
@@ -80,10 +102,6 @@ fn main() {
              */
         }
         println!("{:02.3}", start.elapsed().as_secs_f32());
-        if SCALE == 1 && i == 9 {
-            println!("overriding image");
-            RgbImage::from(image).save(format!("output/circle.png")).unwrap();
-        }
     }
 }
 
