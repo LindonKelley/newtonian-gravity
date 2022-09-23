@@ -51,6 +51,7 @@ impl PaintScalar<image::Rgb<u8>> for GrayscaleRgbScalar {
 }
 
 pub trait Rasterizer<Canvas, Paint, Scalar: PaintScalar<Paint>> {
+    // r should not be negative
     fn draw_filled_circle(canvas: &mut Canvas, cx: f32, cy: f32, r: f32, paint: Paint);
 }
 
@@ -202,24 +203,60 @@ impl <Paint: Copy, Canvas: HorizontalLineCanvas<Paint>, Scalar: PaintScalar<Pain
         if min_x >= canvas.width() {
             return;
         }
-        let max_x = u32::min((cx + r + 1.0) as u32, canvas.width());
+
         let min_y = (cy - r) as u32;
         if min_y >= canvas.height() {
             return;
         }
+
         let max_y = u32::min((cy + r + 1.0) as u32, canvas.height());
 
-        for y in min_y..max_y {
-            let y0 = y as f32;
-            let y1 = y0 + 1.0;
-            for x in min_x..max_x {
-                let x0 = x as f32;
-                let x1 = x0 + 1.0;
-                let a = area_intersection_circle_rectangle(x0, y0, x1, y1, cx, cy, r);
-                let scaled_paint = Scalar::scale(&paint, a, Some(|f| f32::min(f, 1.0)));
-                unsafe {
-                    canvas.draw_pixel_unchecked(x, y, scaled_paint);
+        if r <= 2.0 {
+            let max_x = u32::min((cx + r + 1.0) as u32, canvas.width());
+
+            for y in min_y..max_y {
+                let y0 = y as f32;
+                let y1 = y0 + 1.0;
+                for x in min_x..max_x {
+                    let x0 = x as f32;
+                    let x1 = x0 + 1.0;
+                    let a = area_intersection_circle_rectangle(x0, y0, x1, y1, cx, cy, r);
+                    let scaled_paint = Scalar::scale(&paint, a, Some(|f| clamp(f, 0.0, 1.0)));
+                    unsafe {
+                        canvas.draw_pixel_unchecked(x, y, scaled_paint);
+                    }
                 }
+            }
+        } else {
+            let r_sq = r * r;
+
+            // Rust seems to inline this
+            let mut draw = |r_x: f32, y, y0, y1| {
+                let min_x = (cx - r_x) as u32;
+                let max_x = u32::min((cx + r_x) as u32 + 1, canvas.width());
+
+                for x in min_x..max_x {
+                    let x0 = x as f32;
+                    let x1 = x0 + 1.0;
+                    let a = area_intersection_circle_rectangle(x0, y0, x1, y1, cx, cy, r);
+                    let scaled_paint = Scalar::scale(&paint, a, Some(|f| f32::min(f, 1.0)));
+                    unsafe {
+                        canvas.draw_pixel_unchecked(x, y, scaled_paint);
+                    }
+                }
+            };
+
+            for y in min_y..cy as u32 {
+                let y0 = y as f32;
+                let y1 = y0 + 1.0;
+                let r_x = f32::sqrt(r_sq - ((y1 - cy) * (y1 - cy)));
+                draw(r_x, y, y0, y1);
+            }
+            for y in cy as u32..max_y {
+                let y0 = y as f32;
+                let y1 = y0 + 1.0;
+                let r_x = f32::sqrt(r_sq - ((y0 - cy) * (y0 - cy)));
+                draw(r_x, y, y0, y1);
             }
         }
     }
