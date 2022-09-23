@@ -97,12 +97,18 @@ impl<Pixel: image::Pixel, Container: Deref<Target=[Pixel::Subpixel]> + DerefMut>
 
 impl <Pixel: image::Pixel, Container: Deref<Target = [Pixel::Subpixel]> + DerefMut> HorizontalLineCanvas<Pixel> for HorizontalLineImage<Pixel, Container> {
     unsafe fn draw_pixel_unchecked(&mut self, x: u32, y: u32, color: Pixel) {
+        debug_assert!(x < self.width);
+        debug_assert!(y < self.height);
         let index = self.to_data_index(x, y);
         let ptr = self.data.get_unchecked_mut(index) as *mut _ as *mut Pixel;
         *ptr = color;
     }
 
     unsafe fn draw_horizontal_line_unchecked(&mut self, x0: u32, x1: u32, y: u32, color: Pixel) {
+        debug_assert!(x0 <= x1, "x0({x0}) must be less than or equal to x1({x1})");
+        debug_assert!(x0 < self.width, "x0({x0}) must be less than self.width({})", self.width);
+        debug_assert!(x1 <= self.width, "x1({x1}) must be less than or equal to self.width({})", self.width);
+        debug_assert!(y < self.height, "y({y}) must be less than self.height({})", self.height);
         let start = self.to_data_index(x0, y);
         let mut addr = self.data.get_unchecked_mut(start) as *mut _ as usize;
         let end = self.to_data_index(x1, y);
@@ -231,18 +237,41 @@ impl <Paint: Copy, Canvas: HorizontalLineCanvas<Paint>, Scalar: PaintScalar<Pain
             let r_sq = r * r;
 
             // Rust seems to inline this
-            let mut draw = |r_x: f32, y, y0, y1| {
-                let min_x = (cx - r_x) as u32;
-                let max_x = u32::min((cx + r_x) as u32 + 1, canvas.width());
+            let mut draw_horizontal_line = |r_x: f32, y, y0, y1| {
+                let mut min_x = (cx - r_x) as u32;
+                let mut max_x = u32::min((cx + r_x) as u32 + 1, canvas.width() - 1);
 
-                for x in min_x..max_x {
-                    let x0 = x as f32;
+                loop {
+                    let x0 = min_x as f32;
                     let x1 = x0 + 1.0;
                     let a = area_intersection_circle_rectangle(x0, y0, x1, y1, cx, cy, r);
-                    let scaled_paint = Scalar::scale(&paint, a, Some(|f| f32::min(f, 1.0)));
-                    unsafe {
-                        canvas.draw_pixel_unchecked(x, y, scaled_paint);
+                    if a >= 1.0 {
+                        break
                     }
+                    let scaled_paint = Scalar::scale(&paint, a, Some(|f| f32::max(f, 0.0)));
+                    unsafe {
+                        canvas.draw_pixel_unchecked(min_x, y, scaled_paint);
+                    }
+                    min_x += 1;
+                    if min_x >= max_x {
+                        return;
+                    }
+                }
+                loop {
+                    let x0 = max_x as f32;
+                    let x1 = x0 + 1.0;
+                    let a = area_intersection_circle_rectangle(x0, y0, x1, y1, cx, cy, r);
+                    if a >= 1.0 {
+                        break
+                    }
+                    let scaled_paint = Scalar::scale(&paint, a, Some(|f| f32::max(f, 0.0)));
+                    unsafe {
+                        canvas.draw_pixel_unchecked(max_x, y, scaled_paint);
+                    }
+                    max_x -= 1;
+                }
+                unsafe {
+                    canvas.draw_horizontal_line_unchecked(min_x, max_x + 1, y, paint);
                 }
             };
 
@@ -250,13 +279,13 @@ impl <Paint: Copy, Canvas: HorizontalLineCanvas<Paint>, Scalar: PaintScalar<Pain
                 let y0 = y as f32;
                 let y1 = y0 + 1.0;
                 let r_x = f32::sqrt(r_sq - ((y1 - cy) * (y1 - cy)));
-                draw(r_x, y, y0, y1);
+                draw_horizontal_line(r_x, y, y0, y1);
             }
             for y in cy as u32..max_y {
                 let y0 = y as f32;
                 let y1 = y0 + 1.0;
                 let r_x = f32::sqrt(r_sq - ((y0 - cy) * (y0 - cy)));
-                draw(r_x, y, y0, y1);
+                draw_horizontal_line(r_x, y, y0, y1);
             }
         }
     }

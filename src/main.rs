@@ -64,7 +64,7 @@ fn main() {
     let mut image: HorizontalLineImage<_, _> = RgbImage::new(100, 100).into();
     //let mut image = RgbImage::new(100 * SCALE, 100 * SCALE);
     for (cx, cy, r) in circles {
-        //<FastIntegerRasterizer as Rasterizer<_, _, GrayscaleRgbScalar>>::draw_filled_circle(&mut image, cx * SCALE as f32, cy * SCALE as f32, r * SCALE as f32, [255, 255, 255].into());
+        //<FastIntegerRasterizer as Rasterizer<_, _, GrayscaleRgbScalar>>::draw_filled_circle(&mut image, cx as f32, cy as f32, r as f32, [255, 255, 255].into());
         <AreaIntersectionRasterizer as Rasterizer<_, _, GrayscaleRgbScalar>>::draw_filled_circle(&mut image, cx, cy, r, [255, 255, 255].into());
 
         /*
@@ -78,7 +78,7 @@ fn main() {
     }
     println!("overriding image");
     RgbImage::from(image).save("output/circle.png").unwrap();
-    let (image_diff, num_diff) = rgb_image_subtract("output/inter_circle.png", "output/circle.png");
+    let (image_diff, num_diff) = rgb_image_subtract("output/inter_circle.png", "output/circle.png", 1.0);
     image_diff.save("output/difference.png").unwrap();
     println!("difference: {}", num_diff);
 
@@ -105,7 +105,7 @@ fn main() {
     }
 }
 
-fn rgb_image_subtract<P: AsRef<Path>>(path_a: P, path_b: P) -> (RgbImage, u64) {
+fn rgb_image_subtract<P: AsRef<Path>>(path_a: P, path_b: P, amplifier: f32) -> (RgbImage, u64) {
     let image_a = if let DynamicImage::ImageRgb8(image) =
         Reader::open(path_a).unwrap().decode().unwrap()
             { image } else { panic!() };
@@ -123,12 +123,12 @@ fn rgb_image_subtract<P: AsRef<Path>>(path_a: P, path_b: P) -> (RgbImage, u64) {
         let b = b.0[0];
         match a.cmp(&b) {
             Ordering::Less => {
-                c.0 = [b - a, b - a, 0];
+                c.0 = [((b as f32 - a as f32) * amplifier) as u8, ((b as f32 - a as f32) * amplifier) as u8, 0];
                 diff += (b - a) as u64;
             }
             Ordering::Equal => {}
             Ordering::Greater => {
-                c.0 = [0, 0, a - b];
+                c.0 = [0, 0, ((a as f32 - b as f32) * amplifier) as u8];
                 diff += (a - b) as u64;
             }
         }
