@@ -205,17 +205,17 @@ pub struct AreaIntersectionRasterizer;
 
 impl <Paint: Copy, Canvas: HorizontalLineCanvas<Paint>, Scalar: PaintScalar<Paint>> Rasterizer<Canvas, Paint, Scalar> for AreaIntersectionRasterizer {
     fn draw_filled_circle(canvas: &mut Canvas, cx: f32, cy: f32, r: f32, paint: Paint) {
-        let min_x = (cx - r) as u32;
-        if min_x >= canvas.width() {
-            return;
-        }
-
         let min_y = (cy - r) as u32;
         if min_y >= canvas.height() {
             return;
         }
 
         let max_y = u32::min((cy + r + 1.0) as u32, canvas.height());
+
+        let min_x = (cx - r) as u32;
+        if min_x >= canvas.width() {
+            return;
+        }
 
         if r <= 2.0 {
             let max_x = u32::min((cx + r + 1.0) as u32, canvas.width());
@@ -237,7 +237,9 @@ impl <Paint: Copy, Canvas: HorizontalLineCanvas<Paint>, Scalar: PaintScalar<Pain
             let r_sq = r * r;
 
             // Rust seems to inline this
-            let mut draw_horizontal_line = |r_x: f32, y, y0, y1| {
+            // the caller must ensure y is within the image, this would be marked as unsafe if that were possible
+            // (worth noting all possible callers only in this function, so this isn't really an issue)
+            let mut draw_horizontal_line_unchecked_y = |r_x: f32, y, y0, y1| {
                 let mut min_x = (cx - r_x) as u32;
                 let mut max_x = u32::min((cx + r_x) as u32 + 1, canvas.width() - 1);
 
@@ -279,13 +281,13 @@ impl <Paint: Copy, Canvas: HorizontalLineCanvas<Paint>, Scalar: PaintScalar<Pain
                 let y0 = y as f32;
                 let y1 = y0 + 1.0;
                 let r_x = f32::sqrt(r_sq - ((y1 - cy) * (y1 - cy)));
-                draw_horizontal_line(r_x, y, y0, y1);
+                draw_horizontal_line_unchecked_y(r_x, y, y0, y1);
             }
             for y in cy as u32..max_y {
                 let y0 = y as f32;
                 let y1 = y0 + 1.0;
                 let r_x = f32::sqrt(r_sq - ((y0 - cy) * (y0 - cy)));
-                draw_horizontal_line(r_x, y, y0, y1);
+                draw_horizontal_line_unchecked_y(r_x, y, y0, y1);
             }
         }
     }
