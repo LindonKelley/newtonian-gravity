@@ -1,3 +1,5 @@
+use std::io::Write;
+use std::iter::repeat;
 use crate::render::cpu;
 use std::marker::PhantomData;
 use std::mem;
@@ -8,7 +10,7 @@ pub struct CPURenderer<
     Canvas,
     Paint,
     PaintScalar: cpu::PaintScalar<Paint>,
-    FrameHandler: cpu::FrameHandler<Canvas>,
+    FrameHandler: cpu::FrameHandler<Canvas = Canvas>,
     Rasterizer: cpu::Rasterizer<Canvas, Paint, PaintScalar>
 > {
     frame_handler: FrameHandler,
@@ -19,7 +21,7 @@ impl <
     Canvas,
     Paint,
     PaintScalar: cpu::PaintScalar<Paint>,
-    FrameHandler: cpu::FrameHandler<Canvas>,
+    FrameHandler: cpu::FrameHandler<Canvas = Canvas>,
     Rasterizer: cpu::Rasterizer<Canvas, Paint, PaintScalar>
 > CPURenderer<Canvas, Paint, PaintScalar, FrameHandler, Rasterizer> {
     pub fn new(frame_handler: FrameHandler) -> Self {
@@ -30,16 +32,53 @@ impl <
     }
 }
 
-pub trait FrameHandler<Canvas> {
-    fn produce(&self) -> Canvas;
+pub trait FrameHandler {
+    type Canvas;
 
-    fn consume(&self, canvas: Canvas);
+    fn produce(&mut self) -> Self::Canvas;
+
+    fn consume(&mut self, canvas: Self::Canvas);
+}
+
+pub struct GifHandler<W: Write> {
+    width: u32,
+    height: u32,
+    default_color: image::Rgba<u8>,
+    encoder: image::codecs::gif::GifEncoder<W>
+}
+
+impl <W: Write> GifHandler<W> {
+    pub fn new(width: u32, height: u32, default_color: image::Rgba<u8>, writer: W) -> Self {
+        use image::codecs::gif::*;
+        let mut encoder = GifEncoder::new(writer);
+        encoder.set_repeat(Repeat::Infinite).expect("unable to make gif infinitely repeatable");
+        Self { width, height, default_color, encoder }
+    }
+}
+
+impl <W: Write> FrameHandler for GifHandler<W> {
+    type Canvas = HorizontalLineImage<image::Rgba<u8>, Vec<u8>>;
+
+    fn produce(&mut self) -> Self::Canvas {
+        HorizontalLineImage::new(self.width, self.height, |size| {
+            repeat(self.default_color.0).flatten().take(size).collect()
+        })
+    }
+
+    fn consume(&mut self, canvas: Self::Canvas) {
+        self.encoder.encode_frame(image::Frame::new(canvas.into())).expect("unable to encode frame");
+    }
 }
 
 pub trait PaintScalar<Paint> {
     fn scale(paint: &Paint, scale: f32, clamp: Option<fn(f32) -> f32>) -> Paint;
 }
 
+/// grayscale RGB scaling
+///
+/// Paint: [RGB](image::Rgb) -> takes the `R` component and multiplies it by `scale`, then expands it to fill the `G` and `B` components
+///
+/// Paint: [RGBA](image::Rgba) -> same procedure as RGB, `A` is simply copied from the input (not scaled)
 pub struct GrayscaleRgbScalar;
 
 impl PaintScalar<image::Rgb<u8>> for GrayscaleRgbScalar {
@@ -47,6 +86,14 @@ impl PaintScalar<image::Rgb<u8>> for GrayscaleRgbScalar {
         // converting f32 to u8 through `as` is a clamping operation, so `clamp` can be ignored
         let c = (paint.0[0] as f32 * scale) as u8;
         [c; 3].into()
+    }
+}
+
+impl PaintScalar<image::Rgba<u8>> for GrayscaleRgbScalar {
+    fn scale(paint: &image::Rgba<u8>, scale: f32, _: Option<fn(f32) -> f32>) -> image::Rgba<u8> {
+        // converting f32 to u8 through `as` is a clamping operation, so `clamp` can be ignored
+        let c = (paint.0[0] as f32 * scale) as u8;
+        [c, c, c, paint.0[3]].into()
     }
 }
 
@@ -77,6 +124,21 @@ pub struct HorizontalLineImage<Pixel: image::Pixel, Container: Deref<Target = [P
 }
 
 impl <Pixel: image::Pixel, Container: Deref<Target = [Pixel::Subpixel]> + DerefMut> HorizontalLineImage<Pixel, Container> {
+    pub fn new<CC: FnOnce(usize) -> Container>(width: u32, height: u32, container_constructor: CC) -> Self {
+        let len = Some(Pixel::CHANNEL_COUNT as usize)
+            .and_then(|size| size.checked_mul(width as usize))
+            .and_then(|size| size.checked_mul(height as usize))
+            .expect(&format!("buffer length overflows usize (w:{width}, h:{height})"));
+        let data = container_constructor(len);
+        assert_eq!(data.len(), len, "container length({}) must equal desired length({})", data.len(), len);
+        Self {
+            width,
+            height,
+            data,
+            __phantom: PhantomData
+        }
+    }
+
     #[inline(always)]
     fn to_data_index(&self, x: u32, y: u32) -> usize {
         (y as usize * self.width as usize + x as usize) * mem::size_of::<Pixel>()
@@ -141,15 +203,15 @@ impl <Pixel: image::Pixel, Container: Deref<Target = [Pixel::Subpixel]> + DerefM
     }
 }
 
-pub struct FastIntegerRasterizer;
+pub struct IntegerRasterizer;
 
-impl <Paint: Copy, Canvas: HorizontalLineCanvas<Paint>, Scalar: PaintScalar<Paint>> Rasterizer<Canvas, Paint, Scalar> for FastIntegerRasterizer {
+impl <Paint: Copy, Canvas: HorizontalLineCanvas<Paint>, Scalar: PaintScalar<Paint>> Rasterizer<Canvas, Paint, Scalar> for IntegerRasterizer {
     fn draw_filled_circle(canvas: &mut Canvas, cx: f32, cy: f32, r: f32, paint: Paint) {
         Self::draw_filled_circle_internal(canvas, cx, cy, r, paint);
     }
 }
 
-impl FastIntegerRasterizer {
+impl IntegerRasterizer {
     // this implementation doesn't draw circles beyond i32::MAX in order to save on a bit of speed
     // (and my sanity), and because rendering an image that large seems a bit extreme
     #[inline(always)]
@@ -238,7 +300,7 @@ impl <Paint: Copy, Canvas: HorizontalLineCanvas<Paint>, Scalar: PaintScalar<Pain
 
             // Rust seems to inline this
             // the caller must ensure y is within the image, this would be marked as unsafe if that were possible
-            // (worth noting all possible callers only in this function, so this isn't really an issue)
+            // (worth noting all possible callers are in this function, so this isn't really an issue)
             let mut draw_horizontal_line_unchecked_y = |r_x: f32, y, y0, y1| {
                 let mut min_x = (cx - r_x) as u32;
                 let mut max_x = u32::min((cx + r_x) as u32 + 1, canvas.width() - 1);
