@@ -1,19 +1,19 @@
 use std::sync::Arc;
 use vulkano::device::{Device, DeviceCreateInfo, Queue, QueueCreateInfo};
 use vulkano::pipeline::{ComputePipeline, Pipeline, PipelineBindPoint};
-use vulkano::buffer::{BufferUsage, CpuAccessibleBuffer, DeviceLocalBuffer, ImmutableBuffer};
+use vulkano::buffer::{BufferUsage, CpuAccessibleBuffer, DeviceLocalBuffer};
 use vulkano::instance::{Instance, InstanceCreateInfo};
-use vulkano::device::physical::PhysicalDevice;
 use vulkano::shader::ShaderModule;
 use std::num::NonZeroU16;
-use vulkano::{DeviceSize, sync};
+use vulkano::{DeviceSize, sync, VulkanLibrary};
 use vulkano::descriptor_set::{PersistentDescriptorSet, WriteDescriptorSet};
 use vulkano::command_buffer::{AutoCommandBufferBuilder, CommandBufferUsage};
-use vulkano::sync::GpuFuture;
+use vulkano::sync::{GpuFuture, PipelineStage};
 use crate::{MassPoint, Particle, Vector};
 
 pub struct GPUWorld {
     device: Arc<Device>,
+    queue_family_index: u32,
     queue: Arc<Queue>,
     force_direction_pipeline: Arc<ComputePipeline>,
     acceleration_pipeline: Arc<ComputePipeline>,
@@ -22,24 +22,29 @@ pub struct GPUWorld {
 
 impl GPUWorld {
     pub fn new(particles: Vec<Particle>) -> Self {
-        let instance = Instance::new(InstanceCreateInfo::default())
+        let instance = Instance::new(VulkanLibrary::new().unwrap(), InstanceCreateInfo::default())
             .expect("failed to create instance");
-        let physical = PhysicalDevice::enumerate(&instance)
+        let physical = instance.enumerate_physical_devices()
+            .expect("failed to enumerate physical devices")
             .next()
             .expect("no physical device available");
 
-        let family = physical.queue_families()
-            .find(|&q| q.supports_compute())
-            .expect("missing compute capabilities");
+        let family_index = physical.queue_family_properties().iter().enumerate()
+            .find(|(_, q)| q.supports_stage(PipelineStage::ComputeShader))
+            .expect("missing compute capabilities").0 as u32;
+
         let (device, mut queues) = Device::new(
             physical,
             DeviceCreateInfo {
-                queue_create_infos: vec![QueueCreateInfo::family(family)],
+                queue_create_infos: vec![QueueCreateInfo {
+                    queue_family_index: family_index,
+                    ..Default::default()
+                }],
                 ..Default::default()
             },
         ).expect("failed to create device");
         let queue = queues.next().unwrap();
-        let particles = CpuAccessibleBuffer::from_iter(device.clone(), BufferUsage::all(), false, particles)
+        let particles = CpuAccessibleBuffer::from_iter(device.clone(), Self::storage_buffer_usage(), false, particles)
             .expect("failed to create particle buffer");
         // intellij rust plugin failing to auto detect what type this is
         let force_direction_shader: Arc<ShaderModule> = force_direction_compute_shader::load(device.clone())
@@ -62,6 +67,7 @@ impl GPUWorld {
         ).unwrap();
         Self {
             device,
+            queue_family_index: family_index,
             queue,
             force_direction_pipeline,
             acceleration_pipeline,
@@ -74,8 +80,8 @@ impl GPUWorld {
         let layout = self.force_direction_pipeline.layout().set_layouts().first().unwrap();
         let particle_length = self.particles.read().unwrap().len();
         let force_direction_buffer_length = particle_length * (particle_length - 1) / 2;
-        let (time_buffer, time_buffer_future) = ImmutableBuffer::from_data(stepped_time, BufferUsage::all(), self.queue.clone()).unwrap();
-        let force_direction_buffer: Arc<DeviceLocalBuffer<[Vector]>> = DeviceLocalBuffer::array(self.device.clone(), force_direction_buffer_length as DeviceSize, BufferUsage::all(), self.device.active_queue_families()).unwrap();
+        let (time_buffer, time_buffer_future) = DeviceLocalBuffer::from_data(stepped_time, Self::storage_buffer_usage(), self.queue.clone()).unwrap();
+        let force_direction_buffer: Arc<DeviceLocalBuffer<[Vector]>> = DeviceLocalBuffer::array(self.device.clone(), force_direction_buffer_length as DeviceSize, Self::storage_buffer_usage(), [self.queue_family_index]).unwrap();
         let set = PersistentDescriptorSet::new(
             layout.clone(),
             [
@@ -90,7 +96,7 @@ impl GPUWorld {
         let force_direction_command_buffer = {
             let mut builder = AutoCommandBufferBuilder::primary(
                 self.device.clone(),
-                self.queue.family(),
+                self.queue_family_index,
                 CommandBufferUsage::MultipleSubmit
             ).unwrap();
             builder
@@ -109,7 +115,7 @@ impl GPUWorld {
         let acceleration_command_buffer = {
             let mut builder = AutoCommandBufferBuilder::primary(
                 self.device.clone(),
-                self.queue.family(),
+                self.queue_family_index,
                 CommandBufferUsage::MultipleSubmit
             ).unwrap();
             builder
@@ -144,6 +150,13 @@ impl GPUWorld {
             })
         }
         mass_points
+    }
+
+    fn storage_buffer_usage() -> BufferUsage {
+        BufferUsage {
+            storage_buffer: true,
+            ..BufferUsage::empty()
+        }
     }
 }
 
